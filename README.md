@@ -182,3 +182,7 @@ WebUI 会随当前界面语言自动带上该请求头。
 
 完整清单（含 kube-proxy legacy 后端、hostNetwork Pod、Pod IP 复用窗口、conntrack 优先于策略变更等细节）
 见 [deploy/README.md](deploy/README.md) 的「已知限制」。
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。

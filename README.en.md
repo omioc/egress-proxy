@@ -186,3 +186,7 @@ render them in the language of the request.
 
 For the full list (covering the kube-proxy legacy backend, hostNetwork Pods, the Pod IP reuse window, conntrack taking precedence over policy changes, and other details),
 see "Known limitations" in [deploy/README.en.md](deploy/README.en.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
