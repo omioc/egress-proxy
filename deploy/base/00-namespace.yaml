@@ -1,0 +1,30 @@
+# =============================================================================
+# egress-proxy namespace
+#
+# Note: the ConfigMap is no longer hand-written in this directory; it is generated from deploy/config.yaml by the
+#       configMapGenerator in deploy/kustomization.yaml:
+#         * name egress-proxy-config, data key config.yaml
+#         * the name-hash suffix is disabled (DaemonSet/Deployment reference it by name)
+#       so a real deployment only needs:
+#         1) edit deploy/config.yaml (proxy.address + targets)
+#         2) edit deploy/kustomization.yaml as needed (image addresses)
+#         3) kubectl apply -k deploy/
+#
+# -----------------------------------------------------------------------------
+# egress-proxy 命名空间
+#
+# 注意：ConfigMap 不再手写在本目录，而是由 deploy/kustomization.yaml 的
+#       configMapGenerator 从 deploy/config.yaml 自动生成：
+#         * 名称 egress-proxy-config，data key 为 config.yaml
+#         * 关闭了名称 hash 后缀（DaemonSet/Deployment 按名字引用它）
+#       因此实际部署只需要：
+#         1) 改 deploy/config.yaml（proxy.address + targets）
+#         2) 按需改 deploy/kustomization.yaml（镜像地址）
+#         3) kubectl apply -k deploy/
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: egress-proxy
+  labels:
+    app.kubernetes.io/part-of: egress-proxy

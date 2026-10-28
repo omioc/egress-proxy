@@ -1,0 +1,3492 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title data-i18n="出网代理 · 四元组流量管控">出网代理 · 四元组流量管控</title>
+<link rel="icon" href="data:,">
+<script>
+// 主题与语言都必须在首帧前落地：既避免深浅色切换时的白闪，也避免中文先闪一下再切成英文
+(function () {
+  var root = document.documentElement;
+  var params = null;
+  try { params = new URLSearchParams(window.location.search); } catch (e) { params = null; }
+  function param(name) { return params ? params.get(name) : null; }
+
+  /* ---- 主题：auto（默认，跟随系统）/ light / dark ---- */
+  var pref = null;
+  try { pref = localStorage.getItem('egp_theme'); } catch (e) { pref = null; }
+  var qTheme = param('theme');
+  if (qTheme === 'auto' || qTheme === 'light' || qTheme === 'dark') pref = qTheme;
+  if (pref !== 'light' && pref !== 'dark') pref = 'auto';
+  try { localStorage.setItem('egp_theme', pref); } catch (e) { /* 忽略隐私模式 */ }
+  var mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  function applyPref() {
+    var dark = pref === 'dark' || (pref === 'auto' && !!(mq && mq.matches));
+    root.setAttribute('data-theme', dark ? 'dark' : 'light');
+    root.setAttribute('data-theme-pref', pref);
+  }
+  applyPref();
+  window.__EGP_THEME_PREF = pref;
+  if (mq) {
+    var onSys = function () {
+      if (pref !== 'auto') return;
+      applyPref();
+      if (typeof window.__EGP_ON_SYS_THEME === 'function') window.__EGP_ON_SYS_THEME();
+    };
+    if (mq.addEventListener) mq.addEventListener('change', onSys);
+    else if (mq.addListener) mq.addListener(onSys);
+  }
+
+  /* ---- 语言：zh（默认）/ en；首次访问按系统语言自动选择 ---- */
+  var lang = null;
+  try { lang = localStorage.getItem('egp_lang'); } catch (e) { lang = null; }
+  var qLang = param('lang');
+  if (qLang === 'zh' || qLang === 'en') lang = qLang;
+  if (lang !== 'zh' && lang !== 'en') {
+    var list = (navigator.languages && navigator.languages.length) ? navigator.languages : [navigator.language || ''];
+    lang = 'en';
+    for (var i = 0; i < list.length; i++) {
+      var tag = String(list[i] || '').toLowerCase();
+      if (!tag) continue;
+      lang = tag.indexOf('zh') === 0 ? 'zh' : 'en';
+      break;
+    }
+  }
+  try { localStorage.setItem('egp_lang', lang); } catch (e) { /* 忽略 */ }
+  root.setAttribute('lang', lang === 'en' ? 'en' : 'zh-CN');
+  window.__EGP_LANG = lang;
+})();
+</script>
+<style>
+/* ============================================================================
+   设计契约 · 出网代理控制台
+   ----------------------------------------------------------------------------
+   使命：内网机房里敲 kubectl 的 SRE，要在几秒内看清「哪个负载能访问哪个外部
+         服务（走哪个代理端口）」，并能安全地增删授权、确认每台节点已同步
+   颜色：浅色=灰白底 #f4f5f7 + 纯白卡片 + 1px 低对比边框 + 单一蓝色强调 #3b6cf5；
+         深色=近黑底 #14161a + 卡片 #1b1e24，同一套蓝色语义
+         语义色只用于状态且永远配文字：enforce=橙红 / observe=琥珀 /
+         disabled=中性灰 / 成功=绿 / 未授权与危险=红；颜色从不单独承载信息
+   排版：正文 13.5px/1.5，辅助 12px，微文字 11.5px；无 ALL-CAPS eyebrow，
+         标题里不给单词换色；host / IP / 端口 / generation / 规则一律等宽 +
+         tabular-nums，保证纵向对齐
+   间距：4px 栅格（4/8/12/16/24/32）
+   圆角：8px 控件 / 12px 中块 / 16px 卡片与弹窗 / 999px 胶囊
+   动效：只承载状态变化；hover/press 立即反馈（120ms），列表入场 260ms 轻微
+         上浮 + 60ms 递进，状态切换 180ms；全部尊重 prefers-reduced-motion
+   Do：焦点 2px 环、开关是真实 checkbox、空态给下一步动作、错误文案 pre-wrap 原文
+   Don't：渐变按钮、卡片套卡片、emoji 图标、transition: all、装饰性动画、
+          顶部闪烁加载条
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+  --bg: #f4f5f7;
+  --card: #ffffff;
+  --stripe: #f2f4f8;
+  --thead: #eef0f4;
+  --card-soft: #fafbfd;
+  --inset: #eef0f4;
+  --line: #e5e8ee;
+  --line-strong: #d3d8e2;
+  --fg: #16181d;
+  --fg-dim: #525a68;
+  --fg-mute: #696f7a;
+  --accent: #3b6cf5;
+  --accent-text: #2f57c9;
+  --accent-strong: #2f59d0;
+  --accent-soft: rgba(59, 108, 245, .10);
+  --accent-line: rgba(59, 108, 245, .32);
+  --ok: #137349;
+  --warn: #825b0a;
+  --ok-soft: rgba(23, 143, 91, .10);
+  --ok-line: rgba(23, 143, 91, .30);
+  --warn-soft: rgba(196, 138, 16, .14);
+  --warn-line: rgba(196, 138, 16, .38);
+  --danger: #bb3136;
+  --danger-soft: rgba(201, 53, 58, .10);
+  --danger-line: rgba(201, 53, 58, .30);
+  --enforce: #ae3e24;
+  --enforce-soft: rgba(201, 72, 42, .10);
+  --enforce-line: rgba(201, 72, 42, .30);
+  --neutral: #6b7383;
+  --neutral-soft: rgba(107, 115, 131, .12);
+  --focus: #3b6cf5;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-pill: 999px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --ease: cubic-bezier(.2, .7, .3, 1);
+  --ease-spring: cubic-bezier(.2, 1.05, .35, 1);
+  --t-fast: 120ms;
+  --t-base: 180ms;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #14161a;
+  --card: #1b1e24;
+  --stripe: #21252c;
+  --thead: #262b34;
+  --card-soft: #20242b;
+  --inset: #23272f;
+  --line: #2a2f38;
+  --line-strong: #3a414d;
+  --fg: #e9ecf2;
+  --fg-dim: #a7aebc;
+  --fg-mute: #7e8797;
+  --accent: #6d95ff;
+  --accent-strong: #89a9ff;
+  --accent-text: #719aff;
+  --accent-soft: rgba(109, 149, 255, .16);
+  --accent-line: rgba(109, 149, 255, .40);
+  --ok: #3ecf92;
+  --ok-soft: rgba(62, 207, 146, .14);
+  --ok-line: rgba(62, 207, 146, .34);
+  --warn: #e3a93c;
+  --warn-soft: rgba(227, 169, 60, .14);
+  --warn-line: rgba(227, 169, 60, .34);
+  --danger: #ff6f6a;
+  --danger-soft: rgba(255, 111, 106, .14);
+  --danger-line: rgba(255, 111, 106, .34);
+  --enforce: #ff7a58;
+  --enforce-soft: rgba(255, 122, 88, .14);
+  --enforce-line: rgba(255, 122, 88, .34);
+  --neutral: #98a1b0;
+  --neutral-soft: rgba(152, 161, 176, .14);
+  --focus: #8fb0ff;
+}
+
+/* 1. 基础 ---------------------------------------------------------------- */
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13.5px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, p, figure { margin: 0; }
+ul, ol { margin: 0; padding: 0; list-style: none; }
+button { font: inherit; color: inherit; }
+svg { display: block; }
+a { color: var(--accent); }
+/* 去掉浏览器默认描边：焦点一律由控件自身的 1px 边框或内描边表达（见「聚焦可见性」） */
+:focus { outline: none; }
+:focus-visible { outline: none; }
+::selection { background: var(--accent-soft); }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.skip-link {
+  position: absolute; left: 12px; top: -60px; z-index: 100;
+  padding: 8px 12px; border-radius: var(--r-sm); background: var(--card);
+  border: 1px solid var(--accent); color: var(--fg); text-decoration: none;
+  transition: top var(--t-fast) var(--ease);
+}
+.skip-link:focus-visible { top: 12px; }
+
+/* 2. 顶栏 ---------------------------------------------------------------- */
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 10px 18px; background: var(--card);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand-mark {
+  display: grid; place-items: center; flex: 0 0 auto;
+  width: 32px; height: 32px; border-radius: 10px;
+  background: var(--accent-soft); color: var(--accent);
+}
+.brand-text { min-width: 0; display: block; }
+.brand-name { display: block; font-size: 14px; font-weight: 650; letter-spacing: .01em; line-height: 1.3; }
+.brand-sub { display: block; font-size: 11.5px; color: var(--fg-mute); line-height: 1.35; }
+.topbar-right {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-left: auto;
+}
+.refresh-age { font-size: 11.5px; color: var(--fg-mute); white-space: nowrap; }
+.conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg-dim); white-space: nowrap; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-mute); flex: 0 0 7px; }
+.dot[data-kind="ok"] { background: var(--ok); }
+.dot[data-kind="bad"] { background: var(--danger); }
+.dot[data-kind="busy"] { background: var(--accent); }
+.gen { font-size: 11.5px; color: var(--fg-dim); white-space: nowrap; padding: 0 4px; }
+
+/* 3. 分段控件（模式 / 标签页 / 匹配模式） --------------------------------- */
+.modesw, .tabs, .seg {
+  display: inline-flex; align-items: center; gap: 2px; padding: 3px;
+  border-radius: var(--r-pill); background: var(--inset);
+}
+
+/* 分段控件放进纵向 flex（表单 / 弹窗）时默认会被 align-items: stretch 拉满整行，
+   这里让它只包裹自己的选项 */
+.seg { align-self: flex-start; }
+.mode-btn, .tab, .seg-item > span {
+  height: 26px; padding: 0 12px; border: 0; border-radius: var(--r-pill);
+  background: transparent; color: var(--fg-dim); font-size: 12.5px; font-weight: 500;
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+.mode-btn:hover, .tab:hover { color: var(--fg); background: var(--card-soft); }
+.mode-btn[aria-pressed="true"], .tab[aria-selected="true"] {
+  background: var(--card); color: var(--fg);
+}
+.mode-btn[aria-pressed="true"][data-mode="enforce"] { color: var(--enforce); }
+.mode-btn[aria-pressed="true"][data-mode="observe"] { color: var(--warn); }
+.mode-btn[aria-pressed="true"][data-mode="disabled"] { color: var(--neutral); }
+.seg-item { position: relative; }
+.seg-item > input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none; }
+.seg-item > input:checked + span { background: var(--card); color: var(--fg); }
+/* 焦点样式统一在「聚焦可见性」一节定义 */
+.tab-count {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  font-size: 10.5px; line-height: 15px; min-width: 15px; padding: 0 4px;
+  border-radius: var(--r-pill); background: var(--inset); color: var(--fg-mute); text-align: center;
+}
+.tab[aria-selected="true"] .tab-count { background: var(--accent-soft); color: var(--accent-text); }
+.tab-count[data-tone="danger"] { background: var(--danger-soft); color: var(--danger); }
+
+.tabbar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  /* 与 .main 用同一套 max-width + 居中对齐，保证 tab 与右侧归纳信息跟卡片左右边界齐平 */
+  max-width: 1680px; margin: 0 auto; padding: 12px 18px 0;
+}
+.tabbar-tools { margin-left: auto; font-size: 11.5px; color: var(--fg-mute); }
+
+/* 4. 模式横幅 / 连接横幅 -------------------------------------------------- */
+/* 4. 模式说明 / 连接横幅 --------------------------------------------------- */
+.mode-hint {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+  font-size: 12px; color: var(--fg-mute); line-height: 1.4;
+}
+.mode-hint[data-mode] { color: var(--fg-mute); }
+.mode-hint-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 说明文字保持中性灰，不用语义色，避免看起来像告警 */
+.banners { display: flex; flex-direction: column; }
+.banners:empty { display: none; }
+.banner {
+  display: flex; align-items: center; gap: 10px; padding: 9px 18px;
+  font-size: 12.5px; background: var(--danger-soft); color: var(--fg);
+}
+.banner .banner-text { min-width: 0; word-break: break-word; }
+.banner[data-kind="warn"] { background: var(--warn-soft); }
+.banner .btn { margin-left: auto; flex: 0 0 auto; }
+
+/* 5. 主区 ---------------------------------------------------------------- */
+.main { padding: 14px 18px 44px; max-width: 1680px; margin: 0 auto; }
+.view { display: flex; flex-direction: column; gap: 14px; }
+.view[hidden] { display: none; }
+
+/* 6. 卡片 ---------------------------------------------------------------- */
+.card {
+  background: var(--card);
+  border-radius: var(--r-lg); overflow: hidden;
+}
+.card-head {
+  display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap;
+  padding: 13px 16px;
+}
+.card-head-text { min-width: 0; }
+.card-title { font-size: 13.5px; font-weight: 600; line-height: 1.4; }
+.card-title .mono { font-size: 13.5px; }
+.card-sub { margin-top: 3px; font-size: 11.5px; color: var(--fg-mute); line-height: 1.5; }
+.card-tools { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hint {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 10px 16px; font-size: 12px; line-height: 1.6; color: var(--fg-dim);
+  background: var(--card-soft);
+}
+.hint .icon { margin-top: 1px; flex: 0 0 auto; color: var(--fg-mute); }
+.hint b { color: var(--fg); font-weight: 600; }
+
+/* 7. 按钮 ---------------------------------------------------------------- */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 30px; padding: 0 11px; border-radius: var(--r-sm); vertical-align: middle;
+  border: 1px solid var(--line-strong); background: var(--card); color: var(--fg);
+  font-size: 12.5px; font-weight: 500; cursor: pointer; white-space: nowrap;
+  transition: background-color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+.btn:hover { background: var(--inset); }
+.btn:active { transform: translateY(1px); }
+.btn-primary { background: var(--accent); border-color: transparent; color: #fff; }
+html[data-theme="dark"] .btn-primary { color: #10131a; }
+.btn-primary:hover { background: var(--accent-strong); }
+.btn-danger { color: var(--danger); border-color: var(--danger-line); background: var(--card); }
+.btn-danger:hover { background: var(--danger-soft); }
+.btn-ghost { border-color: transparent; background: transparent; color: var(--fg-dim); }
+.btn-ghost:hover { background: var(--inset); color: var(--fg); }
+.btn-sm { height: 26px; padding: 0 9px; font-size: 12px; }
+/* 危险动作（删除）与同排按钮保持同一形态：图标 + 文字，只换语义色 */
+.btn.is-danger { color: var(--danger); }
+.btn.is-danger:hover { background: var(--danger-soft); color: var(--danger); }
+.cell-actions > .btn + .btn { margin-left: 6px; }
+.btn[disabled], .icon-btn[disabled] { opacity: .55; cursor: not-allowed; transform: none; }
+.icon-btn {
+  display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0;
+  border-radius: var(--r-sm); border: 1px solid transparent; background: transparent;
+  color: var(--fg-dim); cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.icon-btn:hover { background: var(--inset); color: var(--fg); }
+.icon-btn.is-danger:hover { background: var(--danger-soft); color: var(--danger); }
+.icon-btn.icon-sm { width: 26px; height: 26px; }
+
+/* 8. 标记 / 徽标 --------------------------------------------------------- */
+.tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 20px; padding: 0 7px; border-radius: var(--r-pill);
+  border: 1px solid transparent; background: var(--inset); color: var(--fg-dim);
+  font-size: 11.5px; font-weight: 500; white-space: nowrap;
+}
+.tag.mono { font-size: 11.5px; }
+.tag-ok { background: var(--ok-soft); color: var(--ok); border-color: var(--ok-line); }
+.tag-warn { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-line); }
+.tag-danger { background: var(--danger-soft); color: var(--danger); border-color: var(--danger-line); }
+.tag-accent { background: var(--accent-soft); color: var(--accent-text); border-color: var(--accent-line); }
+.tag-neutral { background: var(--neutral-soft); color: var(--neutral); }
+
+/* 9. 表格 ---------------------------------------------------------------- */
+/* 表格：表头与每一行都是独立圆角色块，行间留缝，左右与卡片留内边距——
+   这样隔行底色才有明显边界，不靠任何横线 */
+.table-wrap { overflow-x: auto; padding: 2px 10px 12px; }
+.tbl { width: 100%; border-collapse: separate; border-spacing: 0 6px; font-size: 13px; }
+.tbl th {
+  text-align: left; font-weight: 600; font-size: 11.5px; color: var(--fg-dim);
+  padding: 10px 16px; background: var(--thead);
+  white-space: nowrap;
+}
+.tbl th:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
+.tbl th:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+.tbl td { padding: 13px 16px; vertical-align: middle; }
+/* 隔行底色按「数据行序号」算，展开的详情行不参与计数，
+   否则插入子项后下面每一行的奇偶都翻面，颜色会整体变掉 */
+.tbl tbody tr > td { background: var(--card); }
+.tbl tbody tr.is-alt > td { background: var(--stripe); }
+.tbl tbody tr > td:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
+.tbl tbody tr > td:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+/* 展开的详情行：底色收进内嵌面板，和文字一起缩进（不是把整行铺成灰块） */
+.tbl tbody tr.is-detail > td,
+.tbl tbody tr.is-detail:hover > td { background: transparent; padding: 0 16px; }
+.tbl .detail-panel {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 12px 16px; border-radius: var(--r-sm); background: var(--inset);
+}
+.tbl th.num, .tbl td.num { text-align: right; }
+.tbl .cell-actions { text-align: right; white-space: nowrap; }
+.cell-stack { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cell-main { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 500; word-break: break-all; min-width: 10ch; }
+.cell-note { font-size: 11.5px; color: var(--fg-mute); }
+.cell-note.is-danger { color: var(--danger); white-space: normal; }
+.src-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.src-chip {
+  font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11.5px;
+  padding: 2px 8px; border-radius: var(--r-pill);
+  background: var(--inset); color: var(--fg-dim);
+}
+.row-members { margin-top: 8px; display: grid; gap: 4px; font-size: 12px; }
+.row-members div { display: flex; gap: 8px; flex-wrap: wrap; color: var(--fg-dim); }
+
+/* 10. 空态 --------------------------------------------------------------- */
+.empty {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 40px 24px; text-align: center;
+}
+.empty-icon {
+  display: grid; place-items: center; width: 40px; height: 40px;
+  border-radius: var(--r-md); background: var(--inset); color: var(--fg-mute);
+}
+.empty-title { font-size: 13.5px; font-weight: 600; }
+.empty-desc { max-width: 46ch; font-size: 12.5px; line-height: 1.65; color: var(--fg-dim); }
+.empty-actions { display: flex; gap: 8px; margin-top: 4px; flex-wrap: wrap; justify-content: center; }
+
+/* 11. 授权矩阵 ----------------------------------------------------------- */
+.matrix {
+  display: grid; grid-template-columns: 340px minmax(0, 1fr);
+  gap: 14px; align-items: start;
+}
+.plist { display: flex; flex-direction: column; gap: 2px; padding: 6px; }
+.pitem {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+  border-radius: var(--r-md);
+  transition: background-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+.pitem:hover { background: var(--card-soft); }
+.pitem.is-sel { background: var(--accent-soft); }
+.pitem.is-sel .pitem-name { color: var(--accent-text); }
+.pitem-pick {
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+  padding: 9px 12px; border: 0; background: transparent; text-align: left;
+  border-radius: var(--r-md); cursor: pointer;
+}
+.pitem-name { font-size: 13px; font-weight: 600; word-break: break-all; }
+.pitem-sub { font-size: 11.5px; color: var(--fg-dim); line-height: 1.45; word-break: break-word; }
+.pitem.is-sel .pitem-name { color: var(--accent-text); }
+.pitem-tags { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 4px; }
+.pitem-actions { display: flex; gap: 1px; padding-right: 6px; opacity: .7; transition: opacity var(--t-fast) var(--ease); }
+.pitem:hover .pitem-actions, .pitem:focus-within .pitem-actions { opacity: 1; }
+
+.grants { display: flex; flex-direction: column; gap: 1px; padding: 6px; }
+.grant {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: 12px; padding: 9px 10px; border-radius: var(--r-md);
+  transition: background-color var(--t-fast) var(--ease);
+}
+.grant:hover { background: var(--card-soft); }
+.grant-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.grant-target { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 500; word-break: break-all; }
+.grant-flow { display: flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--fg-dim); }
+.grant-flow .icon { color: var(--fg-mute); }
+.grant-flow b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 600; color: var(--fg); }
+.grant-side { display: flex; align-items: center; gap: 8px; }
+.grant[aria-busy="true"] { opacity: .65; }
+
+/* 胶囊开关 */
+.sw {
+  appearance: none; -webkit-appearance: none; position: relative; margin: 0;
+  flex: 0 0 auto; width: 40px; height: 23px; border-radius: var(--r-pill);
+  background: var(--inset); border: 1px solid var(--line-strong); cursor: pointer;
+  transition: background-color var(--t-base) var(--ease), border-color var(--t-base) var(--ease);
+}
+.sw::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 17px; height: 17px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(16, 24, 40, .25);
+  transition: transform var(--t-base) var(--ease-spring);
+}
+.sw:checked { background: var(--accent); border-color: var(--accent); }
+.sw:checked::after { transform: translateX(17px); }
+.sw:hover:not(:disabled) { border-color: var(--accent); }
+.sw:disabled { cursor: progress; opacity: .7; }
+
+/* 12. 运行状态 ----------------------------------------------------------- */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.stat {
+  display: flex; flex-direction: column; gap: 6px; min-height: 96px;
+  padding: 13px 14px; background: var(--card); border-radius: var(--r-md);
+}
+.stat-label { font-size: 11.5px; color: var(--fg-mute); }
+.stat-value {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  font-size: 19px; font-weight: 600; letter-spacing: -.01em; line-height: 1.2;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.stat-value.is-text { font-family: var(--sans); font-size: 15px; }
+.stat-note { margin-top: auto; font-size: 11.5px; line-height: 1.55; color: var(--fg-dim); }
+.stat-note.is-danger { color: var(--danger); }
+.status-bottom { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 14px; align-items: start; }
+.warnbox { background: var(--card); border-radius: var(--r-lg); overflow: hidden; }
+.warnbox > summary {
+  display: flex; align-items: center; gap: 9px; padding: 13px 16px;
+  font-size: 13px; font-weight: 600; cursor: pointer; list-style: none;
+}
+.warnbox > summary::-webkit-details-marker { display: none; }
+.warnbox > summary:hover { background: var(--card-soft); }
+.warnbox > summary .summary-count { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--warn); }
+.warnbox > summary .icon-end { margin-left: auto; color: var(--fg-mute); transition: transform var(--t-fast) var(--ease); }
+.warnbox[open] > summary { background: var(--card-soft); }
+.warnbox[open] > summary .icon-end { transform: rotate(180deg); }
+.warnbox pre {
+  margin: 0; padding: 14px 16px; max-height: 320px; overflow: auto;
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  font-size: 12px; line-height: 1.7; color: var(--fg-dim);
+  white-space: pre-wrap; word-break: break-word;
+}
+.health { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; }
+.health-line { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; color: var(--fg-dim); line-height: 1.6; }
+.health-line b { color: var(--fg); font-weight: 600; }
+.health-line.is-ok b { color: var(--ok); }
+.health-line.is-bad b { color: var(--danger); }
+.health-meta { font-size: 11.5px; color: var(--fg-mute); }
+
+/* 13. 弹窗 --------------------------------------------------------------- */
+.scrim {
+  position: fixed; inset: 0; z-index: 80; display: grid; place-items: center;
+  padding: 16px; background: rgba(13, 17, 24, .48);
+  animation: fade var(--t-base) var(--ease);
+}
+.modal {
+  width: min(560px, 100%); max-height: min(86vh, 780px);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--card); color: var(--fg);
+  border-radius: var(--r-lg);
+  animation: pop 240ms var(--ease-spring);
+}
+.modal.modal-wide { width: min(680px, 100%); }
+.modal-head { display: flex; align-items: flex-start; gap: 12px; padding: 16px 16px 12px; }
+.modal-head-text { min-width: 0; }
+.modal-title { font-size: 15px; font-weight: 650; line-height: 1.4; }
+.modal-sub { margin-top: 4px; font-size: 12px; color: var(--fg-mute); line-height: 1.55; }
+.modal-x { margin-left: auto; flex: 0 0 auto; }
+.modal-body {
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 4px 16px 16px; overflow: auto;
+}
+.modal-foot {
+  display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap;
+  padding: 12px 16px; background: var(--card-soft);
+}
+.modal-lead { font-size: 13.5px; line-height: 1.6; }
+.modal-note { font-size: 12.5px; line-height: 1.65; color: var(--fg-dim); }
+.modal-warn {
+  display: flex; gap: 8px; padding: 10px 12px; border-radius: var(--r-md);
+  font-size: 12.5px; line-height: 1.6;
+  background: var(--danger-soft); color: var(--fg);
+}
+.modal-warn .icon { flex: 0 0 auto; margin-top: 1px; color: var(--danger); }
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; font-size: 12.5px; }
+.kv dt { color: var(--fg-mute); }
+.kv dd { margin: 0; min-width: 0; word-break: break-word; }
+
+/* 14. 表单 --------------------------------------------------------------- */
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.field-label { font-size: 12px; font-weight: 600; color: var(--fg); }
+.field-hint { font-size: 11.5px; line-height: 1.55; color: var(--fg-mute); }
+.field-err { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--danger); line-height: 1.5; }
+.field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.input {
+  width: 100%; height: 34px; padding: 0 10px; border-radius: var(--r-sm);
+  border: 1px solid var(--line-strong); background: var(--card); color: var(--fg);
+  font: inherit; font-size: 13px;
+  transition: border-color var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease);
+}
+.input::placeholder { color: var(--fg-mute); }
+.input:hover { border-color: var(--fg-mute); }
+.input:focus { border-color: var(--focus); }
+.input[aria-invalid="true"] { border-color: var(--danger); }
+/* 自绘下拉：原生 select 的展开列表由系统渲染（Windows 上是系统样式，CSS 改不动），
+   因此整只控件自绘，只保留 select 的调用方式：appendChild(option) / .value / change 事件 */
+.sel { position: relative; }
+.sel-btn {
+  display: flex; align-items: center; gap: 8px; width: 100%; height: 34px; padding: 0 10px;
+  border-radius: var(--r-sm); border: 1px solid var(--line-strong);
+  background: var(--card); color: var(--fg); font: inherit; font-size: 13px;
+  text-align: left; cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease);
+}
+.sel-btn:hover { border-color: var(--fg-mute); }
+.sel-btn[aria-expanded="true"], .sel-btn:focus-visible { border-color: var(--focus); }
+.sel-btn:disabled { opacity: .55; cursor: not-allowed; }
+.sel-btn:disabled:hover, .sel-btn:disabled[aria-expanded="true"] { border-color: var(--line-strong); }
+.sel-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sel-label.is-empty { color: var(--fg-mute); }
+.sel-caret { flex: 0 0 auto; color: var(--fg-mute); transition: transform var(--t-fast) var(--ease); }
+.sel-btn[aria-expanded="true"] .sel-caret { transform: rotate(180deg); }
+.sel-pop {
+  position: fixed; z-index: 120; padding: 4px; max-height: 264px; overflow: auto;
+  background: var(--card); border: 1px solid var(--line-strong); border-radius: var(--r-md);
+}
+.sel-pop[hidden] { display: none; }
+.sel-opt {
+  display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: var(--r-sm);
+  font-size: 13px; color: var(--fg); cursor: pointer; white-space: nowrap;
+}
+.sel-opt:hover, .sel-opt.is-active { background: var(--accent-soft); }
+.sel-opt[aria-selected="true"] { color: var(--accent-text); font-weight: 600; }
+.sel-opt-mark { margin-left: auto; display: inline-flex; color: var(--accent-text); }
+.field-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* 15. Toast -------------------------------------------------------------- */
+.toasts {
+  position: fixed; right: 16px; bottom: 16px; z-index: 90;
+  display: flex; flex-direction: column; gap: 8px;
+  width: min(420px, calc(100vw - 32px));
+}
+.toast {
+  display: flex; align-items: flex-start; gap: 9px; padding: 10px 12px;
+  background: var(--card); border-radius: var(--r-md); font-size: 12.5px;
+  animation: pop 220ms var(--ease-spring);
+}
+}
+.toast .icon { flex: 0 0 auto; margin-top: 1px; color: var(--fg-mute); }
+.toast::before { content: ""; flex: 0 0 3px; align-self: stretch; border-radius: 2px; background: var(--fg-mute); }
+.toast-ok::before { background: var(--ok); }
+.toast-ok .icon { color: var(--ok); }
+.toast-warn::before { background: var(--warn); }
+.toast-warn .icon { color: var(--warn); }
+.toast-err::before { background: var(--danger); }
+.toast-err .icon { color: var(--danger); }
+.toast-text { margin: 0; min-width: 0; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.toast.is-out { animation: toastOut 200ms var(--ease) forwards; }
+
+/* 16. 聚焦可见性：只把控件自身的 1px 边框换成强调色，不叠加外描边或粗环 ------ */
+/* 有边框的按钮：换 1px 边框色（ghost 的透明边框也会显出来，不会再多套一层框） */
+.btn:focus-visible, .icon-btn:focus-visible, .sw:focus-visible { border-color: var(--focus); }
+/* 无边框控件（标签页、模式切换、分段控件单选、负载列表项）：用 1px 内描边表达焦点 */
+.tab:focus-visible, .mode-btn:focus-visible, .pitem-pick:focus-visible,
+.seg-item > input:focus-visible + span { box-shadow: inset 0 0 0 1px var(--focus); }
+
+/* 17. 动效 --------------------------------------------------------------- */
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pop {
+  from { opacity: 0; transform: translateY(8px) scale(.985); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes toastOut { to { opacity: 0; transform: translateY(4px); } }
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.enter > * { animation: rise 260ms var(--ease-spring) backwards; }
+.enter > *:nth-child(1) { animation-delay: 0ms; }
+.enter > *:nth-child(2) { animation-delay: 35ms; }
+.enter > *:nth-child(3) { animation-delay: 70ms; }
+.enter > *:nth-child(4) { animation-delay: 105ms; }
+.enter > *:nth-child(5) { animation-delay: 140ms; }
+.enter > *:nth-child(6) { animation-delay: 175ms; }
+.enter > *:nth-child(n+7) { animation-delay: 200ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+  .enter > * { animation: none; }
+}
+
+/* 18. 响应式 ------------------------------------------------------------- */
+@media (max-width: 1279px) {
+  .matrix { grid-template-columns: 296px minmax(0, 1fr); }
+  .status-bottom { grid-template-columns: minmax(0, 1fr) 300px; }
+}
+@media (max-width: 1080px) {
+  .status-bottom { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 899px) {
+  .matrix { grid-template-columns: minmax(0, 1fr); }
+  .plist { max-height: 300px; overflow: auto; }
+  .main { padding: 12px 12px 40px; }
+  .topbar, .tabbar, .banner { padding-left: 12px; padding-right: 12px; }
+  .mode-hint { display: none; }
+  .topbar { gap: 10px; }
+  .brand-sub { display: none; }
+}
+@media (max-width: 640px) {
+  .field-row { grid-template-columns: minmax(0, 1fr); }
+  .topbar-right { width: 100%; margin-left: 0; }
+  .tabbar { gap: 8px; }
+  .tabbar-tools { width: 100%; margin-left: 0; }
+  .tab, .mode-btn { padding: 0 10px; }
+  .grant { grid-template-columns: auto minmax(0, 1fr); }
+  .grant-side { grid-column: 2; justify-content: flex-start; }
+  .stat { min-height: 0; }
+}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main" data-i18n="跳到主要内容">跳到主要内容</a>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" id="brandMark" aria-hidden="true"></span>
+    <span class="brand-text">
+      <span class="brand-name" data-i18n="出网代理">出网代理</span>
+      <span class="brand-sub" data-i18n="四元组流量管控">四元组流量管控</span>
+    </span>
+  </div>
+  <div class="modesw" id="modesw" role="group" aria-label="执行模式" data-i18n-aria="执行模式"></div>
+  <span class="mode-hint" id="modeHint"></span>
+  <div class="topbar-right">
+    <span class="refresh-age mono" id="refreshAge" data-i18n="刷新于 —">刷新于 —</span>
+    <span class="conn" id="conn"><span class="dot" id="connDot" data-kind="busy"></span><span id="connText" data-i18n="连接中">连接中</span></span>
+    <span class="gen mono" id="genLabel">gen —</span>
+    <button type="button" class="btn btn-ghost" id="btnRefresh"></button>
+    <button type="button" class="btn btn-ghost" id="btnToken"></button>
+    <button type="button" class="icon-btn" id="btnTheme" aria-label="切换主题" data-i18n-aria="切换主题"></button>
+    <button type="button" class="icon-btn" id="btnLang" aria-label="切换语言"></button>
+  </div>
+</header>
+
+<div class="banners" id="banners"></div>
+
+<div class="tabbar">
+  <div class="tabs" id="tabs" role="tablist" aria-label="控制台分区" data-i18n-aria="控制台分区"></div>
+  <div class="tabbar-tools" id="tabbarTools"></div>
+</div>
+
+<main class="main" id="main">
+  <section class="view" id="view-targets" role="tabpanel" tabindex="-1" aria-labelledby="tab-targets"></section>
+  <section class="view" id="view-matrix" role="tabpanel" tabindex="-1" aria-labelledby="tab-matrix"></section>
+  <section class="view" id="view-status" role="tabpanel" tabindex="-1" aria-labelledby="tab-status"></section>
+</main>
+
+<div class="toasts" id="toasts" role="region" aria-label="操作提示" data-i18n-aria="操作提示"></div>
+<div id="modalRoot"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* 允许反向代理把 UI 挂在子路径下，或本地联调时指向 mock 控制器 */
+  var API = String(window.__EGP_API_BASE || '').replace(/\/+$/, '');
+  var POLL_MS = 5000;
+  var STALE_MS = 60000;
+
+  /* ------------------------------------------------------------------ *
+   * 国际化（zh / en）                                                   *
+   * ------------------------------------------------------------------ *
+   *  - 语言在首帧前就定了：localStorage.egp_lang > ?lang= > 系统语言，见 <head>
+   *  - 文案以「中文原文」为 key，全部集中在下表；未命中的串原样回退中文，
+   *    所以漏译只会留下一句中文，不会把 key 名糊到界面上
+   *  - 含动态数值的句子（「3 个负载」「5 秒前」）走 RULES 里的正则，按语言重排语序
+   *  - 翻译只发生在写 DOM 的边界（h() / appendKid() / textContent），
+   *    内部状态、接口参数、data-* 属性始终是原值，展示与逻辑不耦合
+   * ------------------------------------------------------------------ */
+  var LANG = window.__EGP_LANG === 'en' ? 'en' : 'zh';
+  var IS_EN = LANG === 'en';
+
+  function pl(count, one, many) { return String(count) === '1' ? '1 ' + one : count + ' ' + many; }
+
+  /* 动态句：数组顺序即匹配优先级，具体规则必须在通用规则之前 */
+  var EN_RULES = [
+    /* 时间 */
+    [/^刚刚$/, 'just now'],
+    [/^(\d+) 分 (\d+) 秒前$/, function (m) { return m[1] + 'm ' + m[2] + 's ago'; }],
+    [/^(\d+) 秒前$/, function (m) { return m[1] + 's ago'; }],
+    [/^(\d+) 分钟前$/, function (m) { return m[1] + 'm ago'; }],
+    [/^(\d+) 小时前$/, function (m) { return m[1] + 'h ago'; }],
+    [/^(\d+) 天前$/, function (m) { return m[1] + 'd ago'; }],
+    [/^刷新于 (.*)$/, function (m) { return 'Refreshed ' + T(m[1]); }],
+    /* HTTP / 控制器 */
+    [/^请求失败（HTTP (\d+)）$/, 'Request failed (HTTP $1)'],
+    [/^接口返回了非 JSON 响应（HTTP (\d+)），可能是控制器版本不匹配$/, 'Non-JSON response (HTTP $1); the controller version may not match'],
+    [/^Pod 索引异常：(.*)$/, 'Pod index error: $1'],
+    [/^(.*?)（页面显示的是 (.*?)的数据）$/, function (m) { return m[1] + ' (showing data from ' + T(m[2]) + ')'; }],
+    [/^[，,]\s*gen (\d+)(.*)$/, function (m) {
+      return ', gen ' + m[1] + String(m[2] || '').replace('，存储 ', ', store ').replace('，模式 ', ', mode ');
+    }],
+    [/^：(.*)$/, ': $1'],
+    /* 标签栏汇总 */
+    [/^外部服务 (\d+) 个，负载 (\d+) 个，节点 (\d+) 个$/, function (m) {
+      return pl(m[1], 'service', 'services') + ', ' + pl(m[2], 'payload', 'payloads') + ', ' + pl(m[3], 'node', 'nodes');
+    }],
+    /* 外部服务视图 */
+    [/^(\d+) 个目标，其中 (\d+) 个还没有任何负载被授权$/, function (m) {
+      return pl(m[1], 'target', 'targets') + ', ' + m[2] + ' of them without any authorized payload';
+    }],
+    [/^(\d+) 个目标，全部已有负载被授权$/, function (m) {
+      return pl(m[1], 'target', 'targets') + ', all with authorized payloads';
+    }],
+    [/^生效源 (\d+) 条（由已授权的负载匹配到的 Pod IP 汇总）$/, function (m) {
+      return pl(m[1], 'source', 'sources') + ' (Pod IPs matched by authorized payloads)';
+    }],
+    [/^生效源 (\d+) 条$/, function (m) { return pl(m[1], 'source', 'sources'); }],
+    /* 授权矩阵 */
+    [/^标签 (.*) @ (.*)$/, 'Labels $1 @ $2'],
+    [/^仅按命名空间 (.*)$/, 'Namespace $1 only'],
+    [/^(.*)；已授权 (\d+) \/ (\d+) 个外部服务$/, '$1; $2 / $3 services authorized'],
+    [/^(撤销|授予)(.*) 访问 (.*) 的授权$/, function (m) {
+      return (m[1] === '撤销' ? 'Revoke ' : 'Grant ') + m[2] + ' access to ' + m[3];
+    }],
+    [/^（目标端口 (\d+)）$/, '(target port $1)'],
+    [/^查看负载 (.*) 的授权$/, 'View grants for $1'],
+    [/^编辑负载 (.*)$/, 'Edit payload $1'],
+    [/^删除负载 (.*)$/, 'Delete payload $1'],
+    [/^(\d+) 个负载$/, function (m) { return pl(m[1], 'payload', 'payloads'); }],
+    [/^(\d+) 个 Pod$/, function (m) { return pl(m[1], 'Pod', 'Pods'); }],
+    [/^(\d+) 项授权$/, function (m) { return pl(m[1], 'grant', 'grants'); }],
+    [/^(\d+) 个负载已授权$/, function (m) { return m[1] + ' payloads authorized'; }],
+    /* 运行状态视图 */
+    [/^(直通|观察|强制)模式$/, function (m) { return (EN[m[1]] || m[1]) + ' mode'; }],
+    [/^最近一次同步 (.*)，用于把负载展开成源 IP$/, function (m) { return 'Last sync ' + T(m[1]) + '; used to expand payloads into source IPs'; }],
+    [/^最近一次探测 (.*)$/, function (m) { return 'Last probe ' + T(m[1]); }],
+    [/^(\d+) 个节点上报，(\d+) 个在线，全部已同步$/, function (m) {
+      return pl(m[1], 'node', 'nodes') + ' reporting, ' + m[2] + ' online, all in sync';
+    }],
+    [/^(\d+) 个节点上报，(\d+) 个在线，(\d+) 个待同步或失联$/, function (m) {
+      return pl(m[1], 'node', 'nodes') + ' reporting, ' + m[2] + ' online, ' + m[3] + ' pending or offline';
+    }],
+    [/^(\d+) 个节点上报$/, function (m) { return pl(m[1], 'node', 'nodes') + ' reporting'; }],
+    [/^差 (\d+) 代$/, function (m) { return m[1] + ' gen behind'; }],
+    [/^(\d+) 条$/, '$1'],
+    [/^(\d+) 个$/, '$1'],
+    [/^(\d+) 条：(.*)$/, '$1 grants: $2'],
+    /* 执行模式切换 */
+    [/^当前已经是(.*)模式$/, function (m) { return 'Already in ' + (EN[m[1]] || m[1]) + ' mode'; }],
+    [/^把执行模式从「(.*)」切换到「(.*)」？$/, function (m) {
+      return 'Switch execution mode from “' + (EN[m[1]] || m[1]) + '” to “' + (EN[m[2]] || m[2]) + '”?';
+    }],
+    [/^全部 (\d+) 个已上报节点$/, function (m) { return 'All ' + m[1] + ' reporting nodes'; }],
+    [/^确认切换到(.*)$/, function (m) { return 'Confirm switch to ' + (EN[m[1]] || m[1]); }],
+    [/^执行模式已切换为(.*?)(（gen (\d+)）)?$/, function (m) {
+      return 'Execution mode switched to ' + (EN[m[1]] || m[1]) + (m[3] ? ' (gen ' + m[3] + ')' : '');
+    }],
+    /* 写操作结果 */
+    [/^(.*) 已获授权访问 (.*)（gen (\d+)）$/, '$1 is now authorized for $2 (gen $3)'],
+    [/^已撤销 (.*) 对 (.*) 的授权（gen (\d+)）$/, 'Revoked $1 access to $2 (gen $3)'],
+    [/^已删除负载 (.*)$/, 'Payload deleted: $1'],
+    [/^已删除 (.*)，代理端口 (\d+) 已释放$/, 'Deleted $1; proxy port $2 released'],
+    [/^已更新负载 (.*)$/, 'Payload updated: $1'],
+    [/^已添加负载 (.*)$/, 'Payload added: $1'],
+    [/^已更新 (.*)$/, 'Updated $1'],
+    [/^已新增 (.*)$/, 'Added $1'],
+    /* 表单校验 */
+    [/^代理端口 (\d+) 已被 (.*) 使用，必须全局唯一$/, 'Proxy port $1 is already used by $2; it must be unique'],
+    [/^host:port (.*) 已存在$/, 'host:port $1 already exists'],
+    [/^表单还有 (\d+) 处需要修正$/, function (m) { return m[1] + ' field(s) need fixing'; }],
+    [/^已有同名负载 (.*)，请换一个名称$/, 'A payload named $1 already exists; pick another name'],
+    [/^标签键不合法：(.*)$/, 'Invalid label key: $1'],
+    [/^标签值不合法：(.*)$/, 'Invalid label value: $1'],
+    [/^读取工作负载失败：(.*)$/, 'Failed to read workloads: $1'],
+    [/^正在读取命名空间 (.*) 的工作负载…$/, 'Reading workloads in namespace $1…'],
+    [/^命名空间 (.*) 不在集群列表里，已切换为手动输入$/, 'Namespace $1 is not in the cluster list; switched to manual input'],
+    [/^控制器未连接 apiserver，已切换为手动输入（(.*)）$/, 'The controller has no apiserver connection; switched to manual input ($1)'],
+    /* 删除确认 */
+    [/^删除外部服务 (.*)？$/, 'Delete external service $1?'],
+    [/^(\d+)（删除后释放）$/, '$1 (released on delete)'],
+    [/^这 (\d+) 个负载会立刻失去对 (.*) 的访问授权：enforce 模式下它们的访问会被直接拒绝$/, function (m) {
+      return pl(m[1], 'payload', 'payloads') + ' lose access to ' + m[2] + ' immediately; in enforce mode their traffic is rejected';
+    }],
+    [/^删除后这些 Pod 对 (.*) 的访问授权会一并撤销；enforce 模式下会被直接拒绝；外部服务本身不会被删除$/, function (m) {
+      return 'These Pods lose their access to ' + m[1] + ' as well; in enforce mode the traffic is rejected. The external service itself is kept';
+    }]
+  ];
+
+  /* 静态文案：中文原文 → 英文 */
+  var EN = {
+    /* 品牌 / 页面 */
+    '出网代理': 'Egress proxy',
+    '四元组流量管控': 'Tuple-based traffic control',
+    '出网代理 · 四元组流量管控': 'Egress proxy · Tuple-based traffic control',
+    '跳到主要内容': 'Skip to main content',
+    '控制台分区': 'Console sections',
+    '操作提示': 'Notifications',
+    '执行模式': 'Execution mode',
+    '切换主题': 'Change theme',
+    '切换语言': 'Change language',
+    '切换到中文': 'Switch to Chinese',
+    '切换到浅色主题': 'Switch to light theme',
+    '切换到深色主题': 'Switch to dark theme',
+    '主题：跟随系统（当前深色）': 'Theme: follow system (currently dark)',
+    '主题：跟随系统（当前浅色）': 'Theme: follow system (currently light)',
+    '主题：深色': 'Theme: dark',
+    '主题：浅色': 'Theme: light',
+
+    /* 执行模式 */
+    '直通': 'Pass-through',
+    '不做源地址校验，全部流量都走代理': 'No source filtering; every connection goes through the proxy',
+    '四元组管控已关闭：所有出网流量都会走代理端口转发，不按源地址放行，也不拒绝任何请求':
+      'Tuple control is off: all outbound traffic is forwarded through a proxy port, nothing is allowed by source address and nothing is rejected',
+    '观察': 'Observe',
+    '命中只记日志，不阻断': 'Matches are logged, not blocked',
+    '流量仍然全部走代理；按策略本应被拒绝的连接只记录日志，不阻断；适合先验证策略再切换到强制':
+      'All traffic still goes through the proxy; connections the policy would reject are only logged. Use this to validate a policy before switching to Enforce',
+    '强制': 'Enforce',
+    '未授权的访问会被节点拒绝': 'Unauthorized access is rejected by the node',
+    '只有被授权的负载能访问目标；其余到目标的直连尝试会被节点上的 iptables 显式拒绝':
+      'Only authorized payloads can reach a target; every other attempt is explicitly rejected by iptables on the node',
+
+    /* 分区 */
+    '外部服务': 'Services',
+    '授权矩阵': 'Matrix',
+    '运行状态': 'Status',
+
+    /* 通用 */
+    '未知': 'Unknown',
+    '未知原因': 'unknown reason',
+    '所有命名空间': 'All namespaces',
+    '已连接': 'Connected',
+    '连接失败': 'Connection failed',
+    '连接中': 'Connecting',
+    '读取状态失败': 'Failed to read state',
+    '需要访问令牌': 'Access token required',
+    '无法连接控制器：网络请求失败': 'Cannot reach the controller: network request failed',
+    '控制器要求访问令牌，请填写后再继续': 'The controller requires an access token; enter one to continue',
+    '请选择': 'Select…',
+    '刷新': 'Refresh',
+    '刷新于 —': 'Refreshed —',
+    '令牌': 'Token',
+    '重试': 'Retry',
+    '取消': 'Cancel',
+    '编辑': 'Edit',
+    '删除': 'Delete',
+    '撤销': 'Revoke',
+    '授予': 'Grant',
+    '正常': 'OK',
+    '异常': 'Error',
+    '操作失败': 'Operation failed',
+    '探测失败': 'probe failed',
+    '版本冲突，请刷新后重试': 'Version conflict; refresh and try again',
+    '令牌无效或已过期，请重新填写': 'Token is invalid or expired; enter it again',
+    '关闭弹窗': 'Close dialog',
+
+    /* 加载 / 错误态 */
+    '正在读取控制器状态': 'Loading controller state',
+    '首次加载会请求 /api/v1/state，拿到数据后自动渲染，不需要手动刷新':
+      'The first load calls /api/v1/state and renders automatically once data arrives; no manual refresh needed',
+    '无法读取控制器状态': 'Cannot read controller state',
+    '控制器没有响应；请确认 egress-proxy-controller 已启动，且浏览器能访问它的 API 端口':
+      'The controller is not responding. Check that egress-proxy-controller is running and that this browser can reach its API port',
+    '重新连接': 'Reconnect',
+    '填写访问令牌': 'Enter access token',
+    '尚未读取到控制器状态': 'Controller state not loaded yet',
+    '控制器不可达': 'Controller unreachable',
+
+    /* 外部服务视图 */
+    '新增服务': 'Add service',
+    '还没有外部服务': 'No external services yet',
+    '外部服务决定「哪个域名/IP 的哪个端口，经哪个代理端口出去」，点右上角「新增服务」添加一条，再到「授权矩阵」把负载勾选上，策略才会真正放行流量':
+      'An external service defines which host or IP, on which port, exits through which proxy port. Use “Add service” in the top-right corner, then tick payloads in “Matrix” — only then does the policy allow traffic',
+    '目标': 'Target',
+    '目标端口': 'Port',
+    '代理端口': 'Proxy port',
+    '被负载引用': 'Used by',
+    '生效源': 'Sources',
+    'IPv4 直连': 'IPv4 direct',
+    '无授权，谁都访问不了': 'No grants: nobody can reach it',
+    '展开查看生效源地址': 'Expand to view effective source addresses',
+    '暂无生效源地址': 'No effective source addresses yet',
+    '暂无生效源：说明还没有命中任何 Pod（或没有负载授权这个目标），节点上这条规则的允许集合为空':
+      'No effective sources: no Pod has matched yet (or no payload is authorized for this target), so this rule allows nothing on the node',
+    '四元组的后三元：目标域名或 IP + 目标端口 + 代理端口':
+      'The last three tuple elements: target host or IP + target port + proxy port',
+
+    /* 授权矩阵 */
+    '负载': 'Payloads',
+    '按工作负载名或标签选择器圈定 Pod': 'Scope Pods by workload name or label selector',
+    '添加负载': 'Add payload',
+    '还没有负载': 'No payloads yet',
+    '负载是四元组的第一元：用工作负载名或标签选择器圈定一组 Pod，点右上角「添加负载」开始':
+      'A payload is the first tuple element: it scopes a set of Pods by workload name or label selector. Use “Add payload” in the top-right corner to start',
+    '该负载可访问的外部服务': 'External services this payload can reach',
+    '先在左栏选择一个负载': 'Select a payload in the left column first',
+    '勾选即代表该负载访问此服务时走代理节点对应端口；':
+      'Ticking a service routes this payload through the matching proxy port;',
+    '未勾选的服务在该负载上会被拒绝（enforce 模式）；勾选后立即写入控制器，节点会在数秒内同步':
+      'Unticked services are rejected for this payload in enforce mode; changes are written to the controller immediately and nodes sync within seconds',
+    '还没有外部服务可以授权': 'No external services available to authorize',
+    '授权矩阵的每一行就是一个外部服务；先到「外部服务」新增目标，回来这里勾选即可放行':
+      'Each row in the matrix is one external service. Add a target under “Services” first, then come back and tick it to allow traffic',
+    '去新增外部服务': 'Add an external service',
+    '该目标当前生效源数量': 'Number of effective sources for this target',
+    '选择一个负载': 'Select a payload',
+    '左栏每个负载都能对同一批外部服务单独授权；选中后这里会列出全部外部服务与开关':
+      'Every payload in the left column is authorized separately against the same services; select one to list all services and their switches',
+    ' 经代理端口 ': ' via proxy port ',
+
+    /* 运行状态 */
+    '期望 generation': 'Expected generation',
+    '每次策略变更 +1，节点据此判断是否需要重新应用 iptables 规则':
+      'Increments by one per policy change; nodes use it to decide whether to re-apply iptables rules',
+    '模式': 'Mode',
+    '当前模式': 'Current mode',
+    '未授权流量会被拒绝': 'Unauthorized traffic is rejected',
+    '只记录不阻断': 'Log only, no blocking',
+    '不做源地址管控': 'No source-address control',
+    'Pod 索引': 'Pod index',
+    '已解析负载': 'Resolved payloads',
+    '命中 Pod 的负载数；没有命中的负载不会产生任何放行规则':
+      'Payloads that matched Pods; a payload with no matches produces no allow rules',
+    '还没有配置负载': 'No payloads configured',
+    '已装载目标': 'Loaded targets',
+    '至少有一个负载授权的目标数；装载为 0 的目标在节点上等于拒绝':
+      'Targets with at least one authorized payload; a target with zero loads equals deny on the node',
+    '还没有配置外部服务': 'No external services configured',
+    '重启会丢策略': 'Policy lost on restart',
+    '策略已持久化，控制器重启后会自动恢复': 'Policy is persisted and restored automatically after a controller restart',
+    '存储后端': 'Storage backend',
+    '节点 agent': 'Node agents',
+    '还没有节点上报过状态': 'No node has reported yet',
+    '还没有节点上报': 'No nodes reporting yet',
+    '节点上的 redirect-agent 每 30 秒左右上报一次状态；如果这里一直是空的，确认 DaemonSet 已在全部节点就绪，且能访问控制器的 /api/v1/agent-status':
+      'redirect-agent on each node reports roughly every 30 seconds. If this stays empty, check that the DaemonSet is ready on all nodes and can reach /api/v1/agent-status on the controller',
+    '节点': 'Node',
+    '上报 gen': 'Reported gen',
+    '应用状态': 'Applied',
+    '同步': 'Sync',
+    '最后上报': 'Last report',
+    '错误': 'Error',
+    '已应用': 'Applied',
+    '未应用': 'Not applied',
+    '失联': 'Offline',
+    '待同步': 'Pending',
+    '已同步': 'In sync',
+    '策略告警': 'Policy warnings',
+    '没有告警': 'No warnings',
+    '控制器对当前策略没有需要提醒的事项；出现「匹配全部 Pod」「目标无授权」这类情况时会在这里列出原文':
+      'The controller has nothing to flag for the current policy; entries such as “matches all Pods” or “target has no grants” are listed here verbatim',
+    '控制器连通性': 'Controller connectivity',
+    '对 GET /healthz 发一次探测': 'Send one probe to GET /healthz',
+    '还没有探测过': 'Not probed yet',
+    '探测连通性': 'Probe connectivity',
+
+    /* 执行模式弹窗 */
+    '切换执行模式': 'Switch execution mode',
+    '模式变更会立即写入策略并下发到所有节点': 'Mode changes are written to the policy immediately and pushed to all nodes',
+    '生效范围': 'Scope',
+    '当前 generation': 'Current generation',
+    '确认切换到强制': 'Confirm switch to Enforce',
+    '切换到强制模式后，未被授权的负载访问目标时会被节点 iptables 立即拒绝，可能中断正在进行的连接；建议先在观察模式确认日志里的拒绝记录符合预期':
+      'After switching to Enforce, unauthorized payloads are rejected immediately by iptables on the nodes, which can interrupt in-flight connections. Confirm the reject entries in the logs in Observe mode first',
+    '关闭四元组管控后，所有出网流量都会被代理，不再按源地址放行，也不再拒绝任何请求':
+      'Turning tuple control off proxies all outbound traffic: nothing is allowed by source address and nothing is rejected',
+
+    /* 令牌弹窗 */
+    '访问令牌': 'Access token',
+    '控制器启用 --token 时，所有 /api/ 请求都需要带 X-EGP-Token；令牌保存在本机浏览器 localStorage（egp_token），不会回传给除本控制器以外的任何地方':
+      'When the controller runs with --token, every /api/ request must carry X-EGP-Token. The token is stored in this browser (localStorage egp_token) and is never sent anywhere except this controller',
+    '保存并刷新': 'Save and refresh',
+    '令牌已保存': 'Token saved',
+    '令牌已清除': 'Token cleared',
+    '清除令牌': 'Clear token',
+    '用于保护控制器的管理接口': 'Protects the controller management API',
+
+    /* 外部服务表单 */
+    'a.example.com 或 10.0.0.8': 'a.example.com or 10.0.0.8',
+    '目标 host': 'Target host',
+    '域名或 IPv4；四元组里它就是「目标域名/IP」，节点按 host:port 精确匹配':
+      'Hostname or IPv4. This is the target host of the tuple; nodes match host:port exactly',
+    '外部服务真实监听端口，1–65535': 'Port the external service actually listens on, 1–65535',
+    '负载通过本机这个端口访问目标，必须全局唯一':
+      'Payloads reach the target through this port on the proxy node; it must be globally unique',
+    '请填写目标域名或 IPv4': 'Enter a target hostname or IPv4 address',
+    '不是合法的域名或 IPv4 地址': 'Not a valid hostname or IPv4 address',
+    '请填写目标端口': 'Enter a target port',
+    '端口需为 1–65535 的整数': 'Port must be an integer between 1 and 65535',
+    '请填写代理端口': 'Enter a proxy port',
+    '保存修改': 'Save changes',
+    '编辑外部服务': 'Edit external service',
+    '新增外部服务': 'Add external service',
+    '目标域名/IP + 目标端口 + 代理端口，三者一旦确定就不要随意改动：负载侧引用的是代理端口':
+      'Target host/IP + target port + proxy port. Once set, avoid changing them: payloads reference the proxy port',
+
+    /* 负载表单 */
+    '匹配模式': 'Match mode',
+    '按工作负载名': 'By workload',
+    '按标签选择器': 'By label selector',
+    '命名空间': 'Namespace',
+    '选择命名空间': 'Select a namespace',
+    '正在读取集群命名空间…': 'Reading cluster namespaces…',
+    '控制器未连接 apiserver，已切换为手动输入':
+      'The controller has no apiserver connection; switched to manual input',
+    '工作负载类型': 'Workload kind',
+    '工作负载名称': 'Workload name',
+    '工作负载': 'Workload',
+    '先选择命名空间': 'Select a namespace first',
+    '正在读取工作负载…': 'Reading workloads…',
+    '选择工作负载': 'Select a workload',
+    '选定命名空间后，这里会列出该命名空间下的 Deployment / StatefulSet / DaemonSet':
+      'Once a namespace is selected, its Deployments, StatefulSets and DaemonSets are listed here',
+    '选中后控制器会按该工作负载的 label selector 解析命中的 Pod':
+      'The controller resolves matching Pods from this workload label selector',
+    '标签选择器': 'Label selector',
+    '用逗号分隔的 k=v 列表，Pod 需同时满足全部标签；留空等于匹配所选命名空间下全部 Pod':
+      'Comma-separated k=v pairs; a Pod must match all of them. Empty means every Pod in the selected namespace',
+    '名称需匹配 ^[a-z0-9][a-z0-9-]{0,30}$：小写字母、数字、连字符，1–31 个字符':
+      'Name must match ^[a-z0-9][a-z0-9-]{0,30}$: lowercase letters, digits and hyphens, 1–31 characters',
+    '请选择或填写命名空间': 'Select or enter a namespace',
+    '命名空间名不合法': 'Invalid namespace name',
+    '请选择工作负载类型': 'Select a workload kind',
+    '请选择或填写工作负载名称': 'Select or enter a workload name',
+    '工作负载名称不合法': 'Invalid workload name',
+    '请填写至少一个标签选择器，例如 app=nginx': 'Enter at least one label selector, for example app=nginx',
+    '按工作负载名：按 metadata.name 选中该命名空间下的一个 Deployment / StatefulSet / DaemonSet，控制器再用它的 label selector 匹配 Pod；按标签选择器：完全由你手写的 k=v 决定':
+      'By workload: pick one Deployment / StatefulSet / DaemonSet in the namespace by metadata.name and the controller matches Pods with its label selector. By label selector: matching depends entirely on the k=v pairs you type',
+    '负载名称': 'Payload name',
+    '策略里引用这个名称，需全局唯一；默认按「命名空间-工作负载」生成，可自行修改':
+      'Referenced by the policy; must be globally unique. Generated from namespace-workload by default and editable',
+    '编辑负载': 'Edit payload',
+    '负载 = 四元组的第一元，用命名空间 + 工作负载名或标签圈定一组 Pod':
+      'A payload is the first tuple element: namespace + workload name or labels scope a set of Pods',
+
+    /* 删除确认 */
+    '删除外部服务': 'Delete external service',
+    '目标一旦删除，节点上的对应规则也会随之回收':
+      'Once a target is deleted, the matching rules on the nodes are removed as well',
+    '删除负载': 'Delete payload',
+    '只删除负载定义，Pod 与外部服务都不受影响':
+      'Deletes only the payload definition; Pods and external services are untouched',
+    '确认删除': 'Confirm delete',
+    '受影响授权': 'Affected grants',
+    '没有负载引用这个目标': 'No payload references this target',
+    '匹配': 'Match',
+    '命中 Pod': 'Matched Pods',
+    '将撤销的授权': 'Grants to revoke',
+    '没有授权': 'No grants',
+    '个负载已授权': 'payload(s) authorized',
+    ' 超过 60 秒未上报': ' no report for over 60s'
+  };
+
+  /* 只有这几个属性是给人看的；id / class / data-* 必须保持原值 */
+  var I18N_ATTRS = { title: 1, 'aria-label': 1, placeholder: 1, alt: 1 };
+  function TAttr(name, value) { return I18N_ATTRS[name] ? T(value) : value; }
+
+  function T(s) {
+    if (!IS_EN) return s;
+    var v = EN[s];
+    if (typeof v === 'string') return v;
+    if (!/[\u4e00-\u9fff]/.test(s)) return s;   /* 纯英文与数据直接放行，省掉正则开销 */
+    for (var i = 0; i < EN_RULES.length; i++) {
+      var m = s.match(EN_RULES[i][0]);
+      if (!m) continue;
+      return typeof EN_RULES[i][1] === 'function' ? EN_RULES[i][1](m) : s.replace(EN_RULES[i][0], EN_RULES[i][1]);
+    }
+    return s;
+  }
+
+  /* 静态标记（.html 里写死的那几处）与 document.title */
+  function applyStaticI18n() {
+    document.title = T('出网代理 · 四元组流量管控');
+    Array.prototype.forEach.call(document.querySelectorAll('[data-i18n]'), function (n) {
+      n.textContent = T(n.getAttribute('data-i18n'));
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-i18n-aria]'), function (n) {
+      n.setAttribute('aria-label', T(n.getAttribute('data-i18n-aria')));
+    });
+  }
+
+  /* 一次性构建的容器（模式切换、标签栏、顶栏按钮）在切换语言时必须换成空节点重建，
+     否则文案不会更新，而且旧节点上的监听器会重复叠加 */
+  function resetNode(id) {
+    var n = document.getElementById(id);
+    if (!n || !n.parentNode) return;
+    var c = n.cloneNode(false);
+    /* cloneNode 会连 data-bound 一起复制，那会让重建后的按钮跳过事件绑定 */
+    if (c.removeAttribute) c.removeAttribute('data-bound');
+    n.parentNode.replaceChild(c, n);
+  }
+
+  function setLang(next) {
+    LANG = next === 'en' ? 'en' : 'zh';
+    IS_EN = LANG === 'en';
+    try { localStorage.setItem('egp_lang', LANG); } catch (e) { /* 忽略隐私模式 */ }
+    document.documentElement.setAttribute('lang', IS_EN ? 'en' : 'zh-CN');
+    ['modesw', 'tabs', 'btnRefresh', 'btnToken', 'btnTheme', 'btnLang'].forEach(resetNode);
+    applyStaticI18n();
+    renderStaticButtons();
+    renderModes();
+    renderModeHint();
+    renderTabs();
+    renderAll();
+    setConn(lastConn);
+    /* 服务端文案（校验失败、告警）是按 Accept-Language 生成的，换语言后重新拉一次 */
+    if (store.loaded) refresh({ silent: true });
+  }
+
+  var MODES = [
+    { id: 'disabled', label: '直通', tone: 'neutral', tag: '直通',
+      brief: '不做源地址校验，全部流量都走代理',
+      desc: '四元组管控已关闭：所有出网流量都会走代理端口转发，不按源地址放行，也不拒绝任何请求' },
+    { id: 'observe', label: '观察', tone: 'warn', tag: '观察',
+      brief: '命中只记日志，不阻断',
+      desc: '流量仍然全部走代理；按策略本应被拒绝的连接只记录日志，不阻断；适合先验证策略再切换到强制' },
+    { id: 'enforce', label: '强制', tone: 'danger', tag: '强制',
+      brief: '未授权的访问会被节点拒绝',
+      desc: '只有被授权的负载能访问目标；其余到目标的直连尝试会被节点上的 iptables 显式拒绝' }
+  ];
+  var TABS = [
+    { id: 'targets', label: '外部服务' },
+    { id: 'matrix', label: '授权矩阵' },
+    { id: 'status', label: '运行状态' }
+  ];
+
+  /* ------------------------------------------------------------------ *
+   * DOM 工具（全部走 createElement / textContent，绝不拼 innerHTML）     *
+   * ------------------------------------------------------------------ */
+  var SVGNS = 'http://www.w3.org/2000/svg';
+
+  var ICONS = {
+    shield: { d: ['M8 2.2 13 4.5v4.3c0 2.4-2 4-5 5.1-3-1.1-5-2.7-5-5.1V4.5z', 'M5.9 7.8 7.5 9.4 10.4 6.4'] },
+    plus: { d: ['M8 3.6v8.8', 'M3.6 8h8.8'] },
+    edit: { d: ['M10.7 2.9a1.4 1.4 0 0 1 2 2L6 11.6 3 12.3l.7-3z'] },
+    trash: { d: ['M2.9 4.4h10.2', 'M6.2 4.4V3.1h3.6v1.3', 'M4.2 4.4l.6 8.5h6.4l.6-8.5', 'M6.7 6.7v4', 'M9.3 6.7v4'] },
+    refresh: { d: ['M12.9 8a4.9 4.9 0 1 1-1.5-3.5', 'M13.1 2.6v2.7h-2.7'] },
+    key: { d: ['M6.1 9.9a3.2 3.2 0 1 1 2.2-5.5 3.2 3.2 0 0 1 1 3.3l3.1 3.1v1.6h-1.6V11H9.2l-1.1-1.1', 'M5.6 6.9h.1'] },
+    sun: { d: ['M8 2.4v1.3', 'M8 12.3v1.3', 'M2.4 8h1.3', 'M12.3 8h1.3', 'M4.1 4.1l.9.9', 'M11 11l.9.9', 'M11.9 4.1l-.9.9', 'M5 11l-.9.9'], c: [[8, 8, 2.5]] },
+    moon: { d: ['M12.9 9.7A5.5 5.5 0 0 1 6.3 3.1a5.6 5.6 0 1 0 6.6 6.6z'] },
+    close: { d: ['M4.2 4.2l7.6 7.6', 'M11.8 4.2l-7.6 7.6'] },
+    check: { d: ['M3.2 8.5 6.4 11.6 12.8 4.7'] },
+    alert: { d: ['M8 2.7 14.1 13.1H1.9z', 'M8 6.5v3.1', 'M8 11.4v.1'] },
+    info: { d: ['M8 14A6 6 0 1 0 8 2a6 6 0 0 0 0 12z', 'M8 7.2v4', 'M8 4.9v.1'] },
+    chevron: { d: ['M6 4.2 9.8 8 6 11.8'] },
+    chevronDown: { d: ['M4.2 6 8 9.8 11.8 6'] },
+    box: { d: ['M8 2.2 13.4 5v6L8 13.8 2.6 11V5z', 'M2.6 5 8 7.8 13.4 5', 'M8 7.8v6'] },
+    tag: { d: ['M8.4 2.4H13v4.6l-6.3 6.3a1.3 1.3 0 0 1-1.8 0L2.7 10a1.3 1.3 0 0 1 0-1.8z', 'M10.6 5.2v.1'] },
+    server: { d: ['M2.8 3.4h10.4v3.5H2.8z', 'M2.8 9.1h10.4v3.5H2.8z', 'M5 5.2v.1', 'M5 10.9v.1'] },
+    database: { d: ['M8 2.5c2.9 0 5.2.8 5.2 1.7S10.9 5.9 8 5.9 2.8 5.1 2.8 4.2 5.1 2.5 8 2.5z', 'M2.8 4.2v7.5c0 .9 2.3 1.7 5.2 1.7s5.2-.8 5.2-1.7V4.2', 'M2.8 8c0 .9 2.3 1.7 5.2 1.7s5.2-.8 5.2-1.7'] },
+    activity: { d: ['M1.8 8.4h3l1.9-4.5 2.6 8.5 1.7-4h3.2'] },
+    arrow: { d: ['M3 8h9.4', 'M9.2 4.5 12.7 8 9.2 11.5'] },
+    link: { d: ['M6.4 9.6a2.6 2.6 0 0 0 3.7 0l1.6-1.6a2.6 2.6 0 1 0-3.7-3.7l-.7.7', 'M9.6 6.4a2.6 2.6 0 0 0-3.7 0L4.3 8a2.6 2.6 0 1 0 3.7 3.7l.7-.7'] },
+    lock: { d: ['M4.2 7.1h7.6v6H4.2z', 'M5.9 7.1V5.4a2.1 2.1 0 0 1 4.2 0v1.7'] }
+  };
+
+  function icon(name, size) {
+    var spec = ICONS[name] || ICONS.info;
+    var svg = document.createElementNS(SVGNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('width', String(size || 16));
+    svg.setAttribute('height', String(size || 16));
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.5');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    svg.setAttribute('class', 'icon');
+    (spec.d || []).forEach(function (d) {
+      var p = document.createElementNS(SVGNS, 'path');
+      p.setAttribute('d', d);
+      svg.appendChild(p);
+    });
+    (spec.c || []).forEach(function (c) {
+      var circle = document.createElementNS(SVGNS, 'circle');
+      circle.setAttribute('cx', String(c[0]));
+      circle.setAttribute('cy', String(c[1]));
+      circle.setAttribute('r', String(c[2]));
+      svg.appendChild(circle);
+    });
+    return svg;
+  }
+
+  function h(tag, props) {
+    var n = document.createElement(tag);
+    if (props) {
+      Object.keys(props).forEach(function (k) {
+        var v = props[k];
+        if (v === null || v === undefined || v === false) return;
+        if (k === 'class') n.className = v;
+        else if (k === 'text') n.textContent = T(String(v));
+        else if (k === 'dataset') { Object.keys(v).forEach(function (d) { n.dataset[d] = v[d]; }); }
+        else if (k === 'value' || k === 'checked' || k === 'disabled' || k === 'selected' || k === 'open') n[k] = v;
+        else if (k.indexOf('on') === 0 && typeof v === 'function') n.addEventListener(k.slice(2).toLowerCase(), v);
+        else n.setAttribute(k, v === true ? '' : TAttr(k, String(v)));
+      });
+    }
+    for (var i = 2; i < arguments.length; i++) appendKid(n, arguments[i]);
+    return n;
+  }
+
+  function appendKid(parent, kid) {
+    if (kid === null || kid === undefined || kid === false) return;
+    if (Array.isArray(kid)) { kid.forEach(function (k) { appendKid(parent, k); }); return; }
+    if (typeof kid === 'string') { if (kid !== '') parent.appendChild(document.createTextNode(T(kid))); return; }
+    if (kid instanceof Node) parent.appendChild(kid);
+  }
+
+  function appendAll(parent) {
+    for (var i = 1; i < arguments.length; i++) appendKid(parent, arguments[i]);
+    return parent;
+  }
+
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  /* ------------------------------------------------------------------ *
+   * 通用小工具                                                          *
+   * ------------------------------------------------------------------ */
+  function num(v, dflt) { var n = Number(v); return isFinite(n) ? Math.trunc(n) : dflt; }
+  function str(v) { return typeof v === 'string' ? v : (v === null || v === undefined ? '' : String(v)); }
+  function arr(v) { return Array.isArray(v) ? v : []; }
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+  function relTime(ts) {
+    if (!ts) return '—';
+    var t = Date.parse(ts);
+    if (!isFinite(t)) return '—';
+    var d = Math.round((Date.now() - t) / 1000);
+    if (d < 1) return '刚刚';
+    if (d < 60) return d + ' 秒前';
+    if (d < 3600) return Math.floor(d / 60) + ' 分钟前';
+    if (d < 86400) return Math.floor(d / 3600) + ' 小时前';
+    return Math.floor(d / 86400) + ' 天前';
+  }
+
+  function fmtAgo(ms) {
+    var s = Math.max(0, Math.floor(ms / 1000));
+    if (s < 60) return s + ' 秒前';
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + ' 分 ' + (s % 60) + ' 秒前';
+    return Math.floor(m / 60) + ' 小时前';
+  }
+
+  function absTime(ts) {
+    var t = Date.parse(ts);
+    if (!isFinite(t)) return str(ts) || '—';
+    var d = new Date(t);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) +
+      ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+  }
+
+  function targetKey(t) { return str(t && t.host) + ':' + num(t && t.port, 0); }
+
+  function isIPv4(s) {
+    var parts = String(s).split('.');
+    if (parts.length !== 4) return false;
+    return parts.every(function (p) {
+      return /^\d{1,3}$/.test(p) && Number(p) <= 255 && (p === '0' || p.charAt(0) !== '0');
+    });
+  }
+
+  function isHostName(s) {
+    var v = String(s);
+    if (!v || v.length > 253) return false;
+    var labels = v.split('.');
+    return labels.every(function (l) {
+      return l.length > 0 && l.length <= 63 && /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$/.test(l);
+    });
+  }
+
+  function parsePort(s) {
+    var v = String(s).trim();
+    if (!/^\d{1,5}$/.test(v)) return 0;
+    var n = Number(v);
+    return n >= 1 && n <= 65535 ? n : 0;
+  }
+
+  var PAYLOAD_NAME_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;
+  var NS_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+  var LABEL_RE = /^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$/;
+
+  function parseLabels(text) {
+    var out = {};
+    str(text).split(/[,\n]/).forEach(function (part) {
+      var s = part.trim();
+      if (!s) return;
+      var i = s.indexOf('=');
+      if (i < 0) { out[s] = ''; return; }
+      var k = s.slice(0, i).trim();
+      var val = s.slice(i + 1).trim();
+      if (k) out[k] = val;
+    });
+    return out;
+  }
+
+  function labelsToText(map) {
+    return Object.keys(map || {}).map(function (k) { return k + '=' + map[k]; }).join(',');
+  }
+
+  function slug(s) {
+    var out = str(s).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').replace(/^-+/, '');
+    if (!out) return '';
+    if (!/^[a-z0-9]/.test(out)) out = 'p-' + out;
+    out = out.slice(0, 31).replace(/-+$/, '');
+    return out;
+  }
+
+  function modeMeta(id) {
+    for (var i = 0; i < MODES.length; i++) if (MODES[i].id === id) return MODES[i];
+    return MODES[0];
+  }
+
+  function validMode(id) { return id === 'disabled' || id === 'observe' || id === 'enforce'; }
+
+  /* ------------------------------------------------------------------ *
+   * 令牌 / 主题                                                         *
+   * ------------------------------------------------------------------ */
+  function readToken() { try { return localStorage.getItem('egp_token') || ''; } catch (e) { return ''; } }
+  function writeToken(v) {
+    try { if (v) localStorage.setItem('egp_token', v); else localStorage.removeItem('egp_token'); } catch (e) { /* 忽略隐私模式 */ }
+  }
+  function readTheme() { return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light'; }
+  function readThemePref() {
+    var p = document.documentElement.getAttribute('data-theme-pref');
+    return (p === 'light' || p === 'dark') ? p : 'auto';
+  }
+  function applyTheme(pref) {
+    if (pref !== 'light' && pref !== 'dark') pref = 'auto';
+    var sysDark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.setAttribute('data-theme-pref', pref);
+    document.documentElement.setAttribute('data-theme', (pref === 'dark' || (pref === 'auto' && sysDark)) ? 'dark' : 'light');
+    try { localStorage.setItem('egp_theme', pref); } catch (e) { /* 忽略 */ }
+    renderThemeButton();
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 状态                                                                *
+   * ------------------------------------------------------------------ */
+  var store = { data: null, loaded: false, error: '', lastOkAt: 0, fetching: false, authPrompted: false };
+
+  var ui = {
+    tab: 'targets',
+    selectedPayload: null,
+    expanded: {},          // targetKey -> true（生效源展开）
+    rendered: { targets: false, matrix: false, status: false },
+    modal: null,
+    health: null,          // { ok, message, at, generation }
+    lastTrigger: null,     // 最近一次点击的元素，弹窗关闭后把焦点还给它
+    pendingFocus: null,    // 触发元素被重渲染替换时，等下一次渲染归还焦点
+    popupOpen: false,      // 自绘下拉是否展开（展开时弹窗不抢 Esc / Tab / 方向键）
+    cluster: {
+      ns: { status: 'idle', items: [], error: '', at: 0 },
+      wl: { status: 'idle', ns: '', items: [], error: '', at: 0 }
+    }
+  };
+
+  /* ------------------------------------------------------------------ *
+   * HTTP                                                                *
+   * ------------------------------------------------------------------ */
+  function request(path, opts) {
+    opts = opts || {};
+    var headers = { 'Accept': 'application/json' };
+    /* 让控制器按当前界面语言返回文案（后端按 Accept-Language 协商，缺省中文） */
+    headers['Accept-Language'] = IS_EN ? 'en' : 'zh-CN';
+    var token = readToken();
+    if (token) headers['X-EGP-Token'] = token;
+    if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
+
+
+    return fetch(API + path, {
+      method: opts.method || 'GET',
+      headers: headers,
+      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+      cache: 'no-store',
+      credentials: 'same-origin'
+    }).catch(function () {
+      var e = new Error('无法连接控制器：网络请求失败');
+      e.kind = 'network';
+      throw e;
+    }).then(function (res) {
+      var ct = (res.headers.get('content-type') || '').toLowerCase();
+      var isJson = ct.indexOf('json') >= 0;
+      var payload = null;
+      if (isJson) {
+        return res.text().then(function (text) {
+          try { payload = JSON.parse(text); } catch (e) { payload = null; }
+          return finish(res, payload);
+        });
+      }
+      return res.text().then(function () { return finish(res, null); });
+    });
+
+    function finish(res, payload) {
+      if (res.status === 401) {
+        var err401 = new Error(payload && payload.error ? String(payload.error) : '需要访问令牌');
+        err401.kind = 'auth';
+        err401.status = 401;
+        throw err401;
+      }
+      if (!res.ok) {
+        var msg = payload && typeof payload.error === 'string' ? payload.error : '请求失败（HTTP ' + res.status + '）';
+        var err = new Error(msg);
+        err.kind = 'http';
+        err.status = res.status;
+        throw err;
+      }
+      if (payload === null) {
+        var errParse = new Error('接口返回了非 JSON 响应（HTTP ' + res.status + '），可能是控制器版本不匹配');
+        errParse.kind = 'parse';
+        errParse.status = res.status;
+        throw errParse;
+      }
+      return payload;
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 状态归一化（字段缺失/异常时降级，不白屏）                            *
+   * ------------------------------------------------------------------ */
+  function normalizeState(raw) {
+    var s = (raw && typeof raw === 'object') ? raw : {};
+
+    var payloads = arr(s.payloads).filter(function (p) { return p && typeof p === 'object'; }).map(function (p) {
+      var w = (p.workload && typeof p.workload === 'object') ? p.workload : null;
+      var workload = null;
+      if (w) {
+        var kind = str(w.kind), name = str(w.name);
+        if (kind || name) workload = { kind: kind || 'Deployment', name: name };
+      }
+      var labels = {};
+      if (p.matchLabels && typeof p.matchLabels === 'object') {
+        Object.keys(p.matchLabels).forEach(function (k) { labels[str(k)] = str(p.matchLabels[k]); });
+      }
+      return {
+        name: str(p.name),
+        namespaces: arr(p.namespaces).map(str).filter(Boolean),
+        workload: workload,
+        matchLabels: labels
+      };
+    }).filter(function (p) { return !!p.name; });
+
+    var targets = arr(s.targets).filter(function (t) { return t && typeof t === 'object'; }).map(function (t) {
+      return { host: str(t.host), port: num(t.port, 0), proxyPort: num(t.proxyPort, 0) };
+    }).filter(function (t) { return !!t.host; });
+
+    var grants = arr(s.grants).filter(function (g) { return g && typeof g === 'object'; }).map(function (g) {
+      return { payload: str(g.payload), target: str(g.target) };
+    }).filter(function (g) { return !!g.payload && !!g.target; });
+
+    var members = {};
+    if (s.members && typeof s.members === 'object' && !Array.isArray(s.members)) {
+      Object.keys(s.members).forEach(function (k) {
+        members[k] = arr(s.members[k]).filter(function (m) { return m && typeof m === 'object'; }).map(function (m) {
+          return { namespace: str(m.namespace), name: str(m.name), node: str(m.node), ip: str(m.ip) };
+        });
+      });
+    }
+
+    var sources = {};
+    if (s.sources && typeof s.sources === 'object' && !Array.isArray(s.sources)) {
+      Object.keys(s.sources).forEach(function (k) { sources[k] = arr(s.sources[k]).map(str).filter(Boolean); });
+    }
+
+    var agents = arr(s.agents).filter(function (a) { return a && typeof a === 'object'; }).map(function (a) {
+      return {
+        node: str(a.node),
+        generation: num(a.generation, 0),
+        applied: !!a.applied,
+        mode: str(a.mode),
+        lastSeen: str(a.lastSeen),
+        stale: !!a.stale,
+        error: str(a.error)
+      };
+    }).filter(function (a) { return !!a.node; });
+
+    var stats = (s.stats && typeof s.stats === 'object') ? s.stats : {};
+    var rawMode = str(s.mode);
+
+    return {
+      generation: num(s.generation, 0),
+      mode: validMode(rawMode) ? rawMode : 'disabled',
+      modeRaw: rawMode,
+      payloads: payloads,
+      targets: targets,
+      grants: grants,
+      members: members,
+      sources: sources,
+      agents: agents,
+      stats: {
+        podsKnown: num(stats.podsKnown, 0),
+        payloadsResolved: num(stats.payloadsResolved, 0),
+        targetsArmed: num(stats.targetsArmed, 0)
+      },
+      store: str(s.store) || '未知',
+      warnings: arr(s.warnings).map(function (w) { return typeof w === 'string' ? w : JSON.stringify(w); }),
+      podsAge: str(s.podsAge),
+      podsError: str(s.podsError)
+    };
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 查询辅助                                                            *
+   * ------------------------------------------------------------------ */
+  function payloadNames() { return (store.data ? store.data.payloads : []).map(function (p) { return p.name; }); }
+  function findPayload(name) {
+    var list = store.data ? store.data.payloads : [];
+    for (var i = 0; i < list.length; i++) if (list[i].name === name) return list[i];
+    return null;
+  }
+  function grantsOf(name) {
+    var list = store.data ? store.data.grants : [];
+    return list.filter(function (g) { return g.payload === name; });
+  }
+  function hasGrant(name, key) {
+    return (store.data ? store.data.grants : []).some(function (g) { return g.payload === name && g.target === key; });
+  }
+  function refCount(key) {
+    return (store.data ? store.data.grants : []).filter(function (g) { return g.target === key; }).length;
+  }
+  function membersOf(name) {
+    var m = store.data ? store.data.members[name] : null;
+    return Array.isArray(m) ? m : [];
+  }
+  function sourcesOf(key) {
+    var s = store.data ? store.data.sources[key] : null;
+    return Array.isArray(s) ? s : [];
+  }
+  function sortedTargets() {
+    return (store.data ? store.data.targets.slice() : []).sort(function (a, b) {
+      if (a.host !== b.host) return a.host < b.host ? -1 : 1;
+      return a.port - b.port;
+    });
+  }
+  function payloadSummary(p) {
+    var ns = p.namespaces.length ? p.namespaces[0] : '所有命名空间';
+    if (p.workload && p.workload.name) {
+      return (p.workload.kind || 'Deployment') + '/' + p.workload.name + ' @ ' + ns;
+    }
+    var labelKeys = Object.keys(p.matchLabels || {});
+    if (labelKeys.length) return '标签 ' + labelsToText(p.matchLabels) + ' @ ' + ns;
+    return '仅按命名空间 ' + ns;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 焦点管理（整块重渲染后把焦点放回原处）                              *
+   * ------------------------------------------------------------------ */
+  function captureFocus() {
+    var a = document.activeElement;
+    if (!a || !a.dataset || !a.dataset.fk) return null;
+    var snap = { fk: a.dataset.fk, input: null };
+    if (a.tagName === 'INPUT' || a.tagName === 'SELECT') {
+      snap.input = { value: a.value, selStart: a.selectionStart, selEnd: a.selectionEnd, checked: a.checked };
+    }
+    return snap;
+  }
+  function restoreFocus(snap) {
+    if (!snap) return;
+    var node;
+    try {
+      node = document.querySelector('[data-fk="' + snap.fk.replace(/["\\]/g, '\\$&') + '"]');
+    } catch (e) { node = null; }
+    if (!node) return;
+    try {
+      node.focus({ preventScroll: true });
+      if (snap.input && node.tagName === 'INPUT') {
+        if (snap.input.value !== undefined && node.type !== 'checkbox') node.value = snap.input.value;
+        if (typeof snap.input.selStart === 'number' && node.setSelectionRange) {
+          node.setSelectionRange(snap.input.selStart, snap.input.selEnd);
+        }
+        if (typeof snap.input.checked === 'boolean' && node.type === 'checkbox') node.checked = snap.input.checked;
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  /* 触发元素被重渲染替换时，等下一次渲染完成再把焦点还给同 data-fk 的节点 */
+  function applyPendingFocus() {
+    if (!ui.pendingFocus) return;
+    var fk = ui.pendingFocus;
+    ui.pendingFocus = null;
+    var a = document.activeElement;
+    if (a && a !== document.body && a !== document.documentElement) return;
+    var node = document.querySelector('[data-fk="' + fk.replace(/["\\]/g, '\\$&') + '"]');
+    if (node) { try { node.focus({ preventScroll: true }); } catch (e) { /* ignore */ } }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Toast                                                               *
+   * ------------------------------------------------------------------ */
+  var TOAST_ICONS = { ok: 'check', warn: 'alert', err: 'alert', info: 'info' };
+  function toast(kind, message) {
+    var box = document.getElementById('toasts');
+    var node = h('div', { class: 'toast toast-' + (kind || 'info'), role: kind === 'err' ? 'alert' : 'status' });
+    node.appendChild(icon(TOAST_ICONS[kind] || 'info', 15));
+    node.appendChild(h('p', { class: 'toast-text', text: message }));
+    box.appendChild(node);
+    while (box.childElementCount > 4) box.removeChild(box.firstChild);
+    var ttl = kind === 'err' ? 9000 : 4500;
+    setTimeout(function () {
+      node.classList.add('is-out');
+      setTimeout(function () { if (node.parentNode) node.parentNode.removeChild(node); }, 220);
+    }, ttl);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 轮询 / 刷新                                                         *
+   * ------------------------------------------------------------------ */
+  var pollTimer = null;
+  var ageTimer = null;
+  var lastConn = 'busy';
+
+  function setConn(kind) {
+    var dot = document.getElementById('connDot');
+    var txt = document.getElementById('connText');
+    if (dot) dot.setAttribute('data-kind', kind);
+    lastConn = kind;
+    if (txt) txt.textContent = T(kind === 'ok' ? '已连接' : (kind === 'bad' ? '连接失败' : '连接中'));
+  }
+
+  function refresh(opts) {
+    if (store.fetching) return Promise.resolve();
+    store.fetching = true;
+    setConn('busy');
+    return request('/api/v1/state').then(function (raw) {
+      store.data = normalizeState(raw);
+      store.error = '';
+      store.loaded = true;
+      store.lastOkAt = Date.now();
+      store.authPrompted = false;
+      setConn('ok');
+      if (ui.selectedPayload && !findPayload(ui.selectedPayload)) ui.selectedPayload = null;
+      if (!ui.selectedPayload && store.data.payloads.length) ui.selectedPayload = store.data.payloads[0].name;
+    }).catch(function (e) {
+      store.loaded = true;
+      store.error = e.message || '读取状态失败';
+      setConn('bad');
+      if (e.kind === 'auth' && !store.authPrompted) {
+        store.authPrompted = true;
+        promptToken('控制器要求访问令牌，请填写后再继续');
+      }
+      if (!opts || !opts.silent) toast('err', store.error);
+    }).then(function () {
+      store.fetching = false;
+      renderAll();
+      schedulePoll();
+    });
+  }
+
+  function schedulePoll() {
+    stopPoll();
+    if (document.hidden) return;
+    pollTimer = setTimeout(function () { refresh({ silent: true }); }, POLL_MS);
+  }
+  function stopPoll() {
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  }
+
+  function tickClock() {
+    var el = document.getElementById('refreshAge');
+    if (!el) return;
+    if (!store.lastOkAt) { el.textContent = T('刷新于 —'); return; }
+    el.textContent = T('刷新于 ' + fmtAgo(Date.now() - store.lastOkAt));
+    var nodes = document.querySelectorAll('[data-ts]');
+    for (var i = 0; i < nodes.length; i++) {
+      nodes[i].textContent = relTime(nodes[i].dataset.ts);
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 渲染：顶栏 / 横幅 / 标签页                                          *
+   * ------------------------------------------------------------------ */
+  function iconBtn(name, label, opts) {
+    opts = opts || {};
+    var b = h('button', {
+      type: 'button',
+      class: 'icon-btn' + (opts.small ? ' icon-sm' : '') + (opts.danger ? ' is-danger' : '') + (opts.cls ? ' ' + opts.cls : ''),
+      'aria-label': label,
+      title: opts.title || label,
+      'data-fk': opts.fk || null,
+      disabled: !!opts.disabled
+    });
+    b.appendChild(icon(name, opts.size || 15));
+    if (opts.onClick) b.addEventListener('click', opts.onClick);
+    return b;
+  }
+
+
+  /* 自绘下拉：原生 <select> 的展开列表是系统渲染的，样式改不动，
+     所以整只控件自绘，但保留 select 的调用方式（appendChild(option) / .value / change 事件） */
+  var openSelect = null;
+
+  function hSelect(opts) {
+    opts = opts || {};
+    var items = [];
+    var cur = '';
+    var isOpen = false;
+    var activeIdx = -1;
+    var root = h('div', { class: 'sel' });
+    var btn = h('button', {
+      type: 'button',
+      class: 'sel-btn' + (opts.cls ? ' ' + opts.cls : ''),
+      id: opts.id || null,
+      'data-fk': opts.fk || null,
+      'aria-haspopup': 'listbox',
+      'aria-expanded': 'false',
+      disabled: !!opts.disabled
+    });
+    var label = h('span', { class: 'sel-label' });
+    var caret = icon('chevronDown', 14);
+    caret.setAttribute('class', 'icon sel-caret');
+    btn.appendChild(label);
+    btn.appendChild(caret);
+    root.appendChild(btn);
+    var pop = h('div', { class: 'sel-pop', role: 'listbox', hidden: 'hidden' });
+
+    function renderLabel() {
+      var text = '';
+      for (var i = 0; i < items.length; i++) if (items[i].value === cur) { text = items[i].text; break; }
+      label.textContent = T(text || '请选择');
+      label.classList.toggle('is-empty', !text || cur === '');
+    }
+    function renderList() {
+      clear(pop);
+      items.forEach(function (it, i) {
+        var opt = h('div', {
+          class: 'sel-opt', role: 'option', 'aria-selected': it.value === cur ? 'true' : 'false'
+        }, h('span', { text: it.text }));
+        if (it.value === cur) opt.appendChild(h('span', { class: 'sel-opt-mark' }, icon('check', 13)));
+        // mousedown 只阻止默认行为（保住按钮焦点、避免选中文字），选中放在 click 上，
+        // 否则「mousedown 关浮层」之后真实的 mouseup 会落到浮层下方的按钮，click 又把浮层打开
+        opt.addEventListener('mousedown', function (ev) { ev.preventDefault(); });
+        opt.addEventListener('click', function () { pick(i); });
+        pop.appendChild(opt);
+      });
+    }
+    function setActive(i) {
+      if (i < 0 || i >= items.length) return;
+      activeIdx = i;
+      for (var k = 0; k < pop.children.length; k++) pop.children[k].classList.toggle('is-active', k === i);
+      var node = pop.children[i];
+      if (node) {
+        // 手动滚动到可视区，不用 scrollIntoView：那会连带触发祖先滚动，被当成「页面滚走了」关掉浮层
+        var top = node.offsetTop - 4;
+        var bottom = top + node.offsetHeight;
+        if (top < pop.scrollTop) pop.scrollTop = top;
+        else if (bottom > pop.scrollTop + pop.clientHeight) pop.scrollTop = bottom - pop.clientHeight;
+      }
+    }
+    function onDocDown(ev) {
+      if (root.contains(ev.target) || pop.contains(ev.target)) return;
+      closePop();
+    }
+    function onScroll(ev) {
+      // 浮层自己滚动不算「页面滚走了」
+      if (ev.target === pop || pop.contains(ev.target)) return;
+      closePop();
+    }
+    function onKeyDown(ev) {
+      var k = ev.key;
+      if (k === 'Escape' || k === 'Tab') {
+        closePop();
+        if (k === 'Escape') { ev.preventDefault(); ev.stopPropagation(); }
+        return;
+      }
+      if (k === 'ArrowDown') { ev.preventDefault(); ev.stopPropagation(); setActive(Math.min(items.length - 1, activeIdx + 1)); return; }
+      if (k === 'ArrowUp') { ev.preventDefault(); ev.stopPropagation(); setActive(Math.max(0, activeIdx - 1)); return; }
+      if (k === 'Home') { ev.preventDefault(); setActive(0); return; }
+      if (k === 'End') { ev.preventDefault(); setActive(items.length - 1); return; }
+      if (k === 'Enter' || k === ' ') { ev.preventDefault(); ev.stopPropagation(); pick(activeIdx); }
+    }
+    function pick(i) {
+      var it = items[i];
+      var changed = !!it && it.value !== cur;
+      if (it) cur = it.value;
+      renderLabel();
+      closePop();
+      btn.focus();
+      if (changed) root.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    function openPop() {
+      if (isOpen || !items.length) return;
+      isOpen = true;
+      if (openSelect) openSelect();
+      openSelect = closePop;
+      ui.popupOpen = true;
+      renderList();
+      document.body.appendChild(pop);
+      pop.hidden = false;
+      var r = btn.getBoundingClientRect();
+      var popH = Math.min(pop.scrollHeight, 264);
+      pop.style.minWidth = Math.round(r.width) + 'px';
+      pop.style.left = Math.round(r.left) + 'px';
+      // 下方空间不够且上方更宽裕时向上展开
+      var below = window.innerHeight - r.bottom - 8;
+      pop.style.top = Math.round(below >= popH || below >= r.top - 8 ? r.bottom + 4 : Math.max(8, r.top - 4 - popH)) + 'px';
+      btn.setAttribute('aria-expanded', 'true');
+      var start = 0;
+      for (var i = 0; i < items.length; i++) if (items[i].value === cur) { start = i; break; }
+      setActive(start);
+      document.addEventListener('mousedown', onDocDown, true);
+      document.addEventListener('keydown', onKeyDown, true);
+      window.addEventListener('scroll', onScroll, true);
+      window.addEventListener('resize', closePop, true);
+    }
+    function closePop() {
+      if (!isOpen) return;
+      isOpen = false;
+      if (openSelect === closePop) openSelect = null;
+      ui.popupOpen = false;
+      btn.setAttribute('aria-expanded', 'false');
+      pop.hidden = true;
+      if (pop.parentNode) pop.parentNode.removeChild(pop);
+      document.removeEventListener('mousedown', onDocDown, true);
+      document.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', closePop, true);
+    }
+    btn.addEventListener('click', function () { if (isOpen) closePop(); else openPop(); });
+    btn.addEventListener('keydown', function (ev) {
+      if (!isOpen && (ev.key === 'ArrowDown' || ev.key === 'ArrowUp')) { ev.preventDefault(); openPop(); }
+    });
+
+    // 兼容原生 select 的用法：appendChild(<option>) 收集选项，.value 读写当前值
+    var rawAppend = root.appendChild.bind(root);
+    root.appendChild = function (node) {
+      if (node && node.tagName === 'OPTION') {
+        items.push({ value: node.value === undefined ? '' : String(node.value), text: (node.textContent || '').trim() });
+        if (node.selected) cur = String(node.value || '');
+        renderLabel();
+        return node;
+      }
+      return rawAppend(node);
+    };
+    Object.defineProperty(root, 'value', {
+      get: function () { return cur; },
+      set: function (next) { cur = next === null || next === undefined ? '' : String(next); renderLabel(); }
+    });
+    return root;
+  }
+  function btn(label, opts) {
+    opts = opts || {};
+    var b = h('button', {
+      type: 'button',
+      class: 'btn' + (opts.variant ? ' btn-' + opts.variant : '') + (opts.small ? ' btn-sm' : '') + (opts.danger ? ' is-danger' : ''),
+      'data-fk': opts.fk || null,
+      title: opts.title || null,
+      disabled: !!opts.disabled
+    });
+    if (opts.icon) b.appendChild(icon(opts.icon, opts.small ? 13 : 14));
+    b.appendChild(document.createTextNode(T(label)));
+    if (opts.onClick) b.addEventListener('click', opts.onClick);
+    return b;
+  }
+
+  function renderThemeButton() {
+    var b = document.getElementById('btnTheme');
+    if (!b) return;
+    var pref = readThemePref();
+    var dark = readTheme() === 'dark';
+    clear(b);
+    b.appendChild(icon(dark ? 'moon' : 'sun', 16));
+    b.setAttribute('data-theme-pref', pref);
+    var label = pref === 'auto'
+      ? (dark ? '主题：跟随系统（当前深色）' : '主题：跟随系统（当前浅色）')
+      : (dark ? '主题：深色' : '主题：浅色');
+    b.setAttribute('aria-label', T(label));
+    b.setAttribute('title', T(label));
+  }
+
+  function renderLangButton() {
+    var b = document.getElementById('btnLang');
+    if (!b) return;
+    clear(b);
+    b.textContent = IS_EN ? '中' : 'EN';
+    b.setAttribute('aria-label', IS_EN ? '切换到中文' : 'Switch to English');
+    b.setAttribute('title', IS_EN ? '切换到中文' : 'Switch to English');
+    if (b.dataset.bound !== '1') {
+      b.dataset.bound = '1';
+      b.addEventListener('click', function () { setLang(IS_EN ? 'zh' : 'en'); });
+    }
+  }
+
+  function renderStaticButtons() {
+    var mark = document.getElementById('brandMark');
+    if (mark && !mark.firstChild) mark.appendChild(icon('shield', 18));
+
+    var r = document.getElementById('btnRefresh');
+    if (r && !r.firstChild) {
+      r.appendChild(icon('refresh', 14));
+      r.appendChild(document.createTextNode(T('刷新')));
+      r.addEventListener('click', function () { refresh(); });
+      r.setAttribute('data-fk', 'btn-refresh');
+    }
+    var t = document.getElementById('btnToken');
+    if (t && !t.firstChild) {
+      t.appendChild(icon('key', 14));
+      t.appendChild(document.createTextNode(T('令牌')));
+      t.addEventListener('click', function () { promptToken(''); });
+      t.setAttribute('data-fk', 'btn-token');
+    }
+    var th = document.getElementById('btnTheme');
+    if (th && th.dataset.bound !== '1') {
+      th.dataset.bound = '1';
+      /* 三态循环：跟随系统 → 浅色 → 深色 → 跟随系统 */
+      th.addEventListener('click', function () {
+        var cur = readThemePref();
+        applyTheme(cur === 'auto' ? 'light' : (cur === 'light' ? 'dark' : 'auto'));
+      });
+    }
+    renderThemeButton();
+    renderLangButton();
+  }
+
+  function renderModes() {
+    var box = document.getElementById('modesw');
+    if (!box.childElementCount) {
+      MODES.forEach(function (m) {
+        var b = h('button', {
+          type: 'button',
+          class: 'mode-btn',
+          'data-mode': m.id,
+          'data-fk': 'mode:' + m.id,
+          text: m.label,
+          title: m.desc
+        });
+        b.addEventListener('click', function () { confirmMode(m.id); });
+        box.appendChild(b);
+      });
+    }
+    var cur = store.data ? store.data.mode : null;
+    Array.prototype.forEach.call(box.children, function (b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-mode') === cur ? 'true' : 'false');
+    });
+  }
+
+  /* 模式说明放在模式切换右侧，一行小字即可，不再铺整条色带（那看着像报错横幅） */
+  function renderModeHint() {
+    var hint = document.getElementById('modeHint');
+    if (!hint) return;
+    clear(hint);
+    var cur = store.data ? store.data.mode : null;
+    var meta = modeMeta(cur || 'disabled');
+    hint.setAttribute('data-mode', cur || 'disabled');
+    /* 只放一行说明文字：图标 + 红色会让人以为这是报错，模式状态由左侧切换按钮表达 */
+    hint.appendChild(h('span', {
+      class: 'mode-hint-text',
+      text: cur ? meta.brief : '尚未读取到控制器状态'
+    }));
+    hint.setAttribute('title', T(cur ? meta.desc : '尚未读取到控制器状态'));
+  }
+
+  function renderBanners() {
+    var box = document.getElementById('banners');
+    clear(box);
+    if (store.error) {
+      var b = h('div', { class: 'banner', role: 'status' });
+      b.appendChild(icon('alert', 15));
+      var msg = h('span', { class: 'banner-text' });
+      msg.appendChild(h('b', { text: '控制器不可达' }));
+      msg.appendChild(document.createTextNode(T(' ' + store.error + (store.data ? '（页面显示的是 ' + fmtAgo(Date.now() - store.lastOkAt) + '的数据）' : ''))));
+      b.appendChild(msg);
+      b.appendChild(btn('重试', { small: true, variant: 'ghost', onClick: function () { refresh(); } }));
+      box.appendChild(b);
+    }
+    if (store.data && store.data.podsError) {
+      var p = h('div', { class: 'banner', 'data-kind': 'warn', role: 'status' });
+      p.appendChild(icon('alert', 15));
+      p.appendChild(h('span', { class: 'banner-text', text: 'Pod 索引异常：' + store.data.podsError }));
+      box.appendChild(p);
+    }
+  }
+
+  function renderTabs() {
+    var box = document.getElementById('tabs');
+    if (!box.childElementCount) {
+      TABS.forEach(function (t) {
+        var b = h('button', {
+          type: 'button',
+          class: 'tab',
+          role: 'tab',
+          id: 'tab-' + t.id,
+          'aria-controls': 'view-' + t.id,
+          'aria-selected': 'false',
+          'data-tab': t.id,
+          'data-fk': 'tab:' + t.id,
+          tabindex: '-1'
+        });
+        b.appendChild(document.createTextNode(T(t.label)));
+        b.appendChild(h('span', { class: 'tab-count', text: '0' }));
+        b.addEventListener('click', function () { selectTab(t.id, false); });
+        box.appendChild(b);
+      });
+      box.addEventListener('keydown', function (e) {
+        var order = TABS.map(function (t) { return t.id; });
+        var i = order.indexOf(ui.tab);
+        var next = null;
+        if (e.key === 'ArrowRight') next = order[(i + 1) % order.length];
+        else if (e.key === 'ArrowLeft') next = order[(i - 1 + order.length) % order.length];
+        else if (e.key === 'Home') next = order[0];
+        else if (e.key === 'End') next = order[order.length - 1];
+        if (!next) return;
+        e.preventDefault();
+        selectTab(next, true);
+      });
+    }
+    var counts = { targets: 0, matrix: 0, status: 0 };
+    var danger = {};
+    if (store.data) {
+      counts.targets = store.data.targets.length;
+      counts.matrix = store.data.payloads.length;
+      counts.status = store.data.agents.length;
+      var behind = store.data.agents.filter(function (a) { return agentIsBehind(a); }).length;
+      danger.status = behind > 0 || store.data.warnings.length > 0;
+      danger.targets = store.data.targets.filter(function (t) { return refCount(targetKey(t)) === 0; }).length > 0;
+    }
+    Array.prototype.forEach.call(box.children, function (b) {
+      var id = b.getAttribute('data-tab');
+      var on = id === ui.tab;
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+      b.tabIndex = on ? 0 : -1;
+      var badge = b.querySelector('.tab-count');
+      if (badge) {
+        badge.textContent = String(counts[id] || 0);
+        if (danger[id]) badge.setAttribute('data-tone', 'danger');
+        else badge.removeAttribute('data-tone');
+      }
+    });
+    var tools = document.getElementById('tabbarTools');
+    if (tools) {
+      clear(tools);
+      if (store.data) {
+        tools.textContent = T('外部服务 ' + counts.targets + ' 个，负载 ' + counts.matrix + ' 个，节点 ' + counts.status + ' 个');
+      }
+    }
+  }
+
+  function selectTab(id, focus) {
+    if (ui.tab === id) { if (focus) document.getElementById('tab-' + id).focus(); return; }
+    ui.tab = id;
+    ui.rendered[id] = false;
+    renderAll();
+    if (focus) {
+      var t = document.getElementById('tab-' + id);
+      if (t) t.focus();
+    }
+  }
+
+  function renderAll() {
+    var snap = captureFocus();
+    renderModes();
+    renderModeHint();
+    renderBanners();
+    renderTabs();
+    var gen = document.getElementById('genLabel');
+    if (gen) gen.textContent = store.data ? ('gen ' + store.data.generation) : 'gen —';
+    renderView();
+    restoreFocus(snap);
+    applyPendingFocus();
+    tickClock();
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 渲染：视图调度 + 空/错/载入态                                       *
+   * ------------------------------------------------------------------ */
+  function renderView() {
+    TABS.forEach(function (t) {
+      var sec = document.getElementById('view-' + t.id);
+      sec.hidden = t.id !== ui.tab;
+    });
+    var sec = document.getElementById('view-' + ui.tab);
+    clear(sec);
+    if (!store.loaded) {
+      sec.appendChild(h('div', { class: 'card' },
+        emptyBlock('activity', '正在读取控制器状态', '首次加载会请求 /api/v1/state，拿到数据后自动渲染，不需要手动刷新', [])));
+      return;
+    }
+    if (!store.data) {
+      sec.appendChild(h('div', { class: 'card' },
+        emptyBlock('alert', '无法读取控制器状态',
+          store.error || '控制器没有响应；请确认 egress-proxy-controller 已启动，且浏览器能访问它的 API 端口',
+          [btn('重新连接', { variant: 'primary', icon: 'refresh', onClick: function () { refresh(); } }),
+           btn('填写访问令牌', { icon: 'key', onClick: function () { promptToken(''); } })])));
+      return;
+    }
+    var first = !ui.rendered[ui.tab];
+    ui.rendered[ui.tab] = true;
+    if (ui.tab === 'targets') renderTargetsView(sec, first);
+    else if (ui.tab === 'matrix') renderMatrixView(sec, first);
+    else renderStatusView(sec, first);
+  }
+
+  function emptyBlock(iconName, title, desc, actions) {
+    var box = h('div', { class: 'empty' });
+    box.appendChild(h('div', { class: 'empty-icon' }, icon(iconName, 18)));
+    box.appendChild(h('p', { class: 'empty-title', text: title }));
+    if (desc) box.appendChild(h('p', { class: 'empty-desc', text: desc }));
+    if (actions && actions.length) {
+      var row = h('div', { class: 'empty-actions' });
+      actions.forEach(function (a) { row.appendChild(a); });
+      box.appendChild(row);
+    }
+    return box;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 视图 1：外部服务                                                    *
+   * ------------------------------------------------------------------ */
+  function renderTargetsView(sec, first) {
+    var targets = sortedTargets();
+    var card = h('section', { class: 'card' });
+    var orphanCount = targets.filter(function (t) { return refCount(targetKey(t)) === 0; }).length;
+    var head = h('div', { class: 'card-head' });
+    head.appendChild(h('div', { class: 'card-head-text' },
+      h('h2', { class: 'card-title', text: '外部服务' }),
+      h('p', { class: 'card-sub', text: targets.length
+        ? targets.length + ' 个目标' + (orphanCount ? '，其中 ' + orphanCount + ' 个还没有任何负载被授权' : '，全部已有负载被授权')
+        : '四元组的后三元：目标域名或 IP + 目标端口 + 代理端口' })));
+    var tools = h('div', { class: 'card-tools' },
+      btn('新增服务', { variant: 'primary', icon: 'plus', onClick: function () { openTargetModal(null); }, fk: 'target-add' }));
+    head.appendChild(tools);
+    card.appendChild(head);
+
+    if (!targets.length) {
+      card.appendChild(emptyBlock('link', '还没有外部服务',
+        '外部服务决定「哪个域名/IP 的哪个端口，经哪个代理端口出去」，点右上角「新增服务」添加一条，再到「授权矩阵」把负载勾选上，策略才会真正放行流量'));
+      sec.appendChild(card);
+      return;
+    }
+
+    var wrap = h('div', { class: 'table-wrap' });
+    var table = h('table', { class: 'tbl' });
+    var thead = h('thead');
+    var hr = h('tr');
+    ['目标', '目标端口', '代理端口', '被负载引用', '生效源', ''].forEach(function (label, i) {
+      hr.appendChild(h('th', { scope: 'col', class: i === 1 || i === 2 ? 'num' : (i === 5 ? 'cell-actions' : null), text: label }));
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    var tbody = h('tbody');
+    if (first) tbody.className = 'enter';
+    targets.forEach(function (t, rowIndex) {
+      var key = targetKey(t);
+      var refs = refCount(key);
+      var srcs = sourcesOf(key);
+      var tr = h('tr', { class: rowIndex % 2 ? 'is-alt' : null });
+
+      var hostCell = h('td');
+      hostCell.appendChild(h('div', { class: 'cell-stack' },
+        h('span', { class: 'cell-main', text: key }),
+        /^\d+\.\d+\.\d+\.\d+$/.test(t.host) ? h('span', { class: 'cell-note', text: 'IPv4 直连' }) : null));
+      tr.appendChild(hostCell);
+
+      tr.appendChild(h('td', { class: 'num mono', text: String(t.port) }));
+
+      var proxyCell = h('td', { class: 'num' });
+      proxyCell.appendChild(h('span', { class: 'tag tag-accent mono', text: String(t.proxyPort) }));
+      tr.appendChild(proxyCell);
+
+      var refCell = h('td');
+      if (refs === 0) {
+        var tagWrap = h('div', { class: 'field-inline' });
+        tagWrap.appendChild(h('span', { class: 'tag tag-danger', text: '无授权，谁都访问不了' }));
+        refCell.appendChild(tagWrap);
+      } else {
+        refCell.appendChild(h('div', { class: 'field-inline' },
+          h('span', { class: 'tag mono', text: String(refs) }),
+          h('span', { class: 'cell-note', text: '个负载已授权' })));
+      }
+      tr.appendChild(refCell);
+
+      var srcCell = h('td');
+      var srcBtn = btn(srcs.length + ' 条', {
+        small: true,
+        variant: 'ghost',
+        fk: 'tgt-src:' + key,
+        title: srcs.length ? '展开查看生效源地址' : '暂无生效源地址',
+        onClick: function () {
+          // 手风琴：同一时刻只展开一个目标，避免整页堆满灰块
+          var wasOpen = !!ui.expanded[key];
+          ui.expanded = {};
+          if (!wasOpen) ui.expanded[key] = true;
+          renderAll();
+        }
+      });
+      srcBtn.setAttribute('aria-expanded', ui.expanded[key] ? 'true' : 'false');
+      var srcWrap = h('div', { class: 'field-inline' });
+      srcWrap.appendChild(srcBtn);
+      if (srcs.length) srcWrap.appendChild(icon(ui.expanded[key] ? 'chevronDown' : 'chevron', 13));
+      srcCell.appendChild(srcWrap);
+      tr.appendChild(srcCell);
+
+      var actions = h('td', { class: 'cell-actions' });
+      actions.appendChild(btn('编辑', { small: true, variant: 'ghost', icon: 'edit', fk: 'tgt-edit:' + key,
+        onClick: function () { openTargetModal(t); } }));
+      actions.appendChild(btn('删除', { small: true, variant: 'ghost', icon: 'trash', danger: true, fk: 'tgt-del:' + key,
+        onClick: function () { confirmDeleteTarget(t); } }));
+      tr.appendChild(actions);
+      tbody.appendChild(tr);
+
+      if (ui.expanded[key]) {
+        var detail = h('tr', { class: 'is-detail' });
+        var td = h('td', { colspan: '6' });
+        var panel = h('div', { class: 'detail-panel' });
+        if (!srcs.length) {
+          panel.appendChild(h('p', { class: 'cell-note', text: '暂无生效源：说明还没有命中任何 Pod（或没有负载授权这个目标），节点上这条规则的允许集合为空' }));
+        } else {
+          var list = h('div', { class: 'src-list' });
+          srcs.forEach(function (s) { list.appendChild(h('span', { class: 'src-chip', text: s })); });
+          panel.appendChild(h('span', { class: 'cell-note', text: '生效源 ' + srcs.length + ' 条（由已授权的负载匹配到的 Pod IP 汇总）' }));
+          panel.appendChild(list);
+        }
+        td.appendChild(panel);
+        detail.appendChild(td);
+        tbody.appendChild(detail);
+      }
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    card.appendChild(wrap);
+    sec.appendChild(card);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 视图 2：授权矩阵                                                    *
+   * ------------------------------------------------------------------ */
+  function renderMatrixView(sec, first) {
+    var d = store.data;
+    var payloads = d.payloads.slice().sort(function (a, b) { return a.name < b.name ? -1 : 1; });
+    if (!payloads.length) ui.selectedPayload = null;
+    else if (!ui.selectedPayload || !findPayload(ui.selectedPayload)) ui.selectedPayload = payloads[0].name;
+
+    var layout = h('div', { class: 'matrix' });
+
+    /* 左栏：负载 */
+    var left = h('section', { class: 'card' });
+    var lhead = h('div', { class: 'card-head' });
+    lhead.appendChild(h('div', { class: 'card-head-text' },
+      h('h2', { class: 'card-title', text: '负载' }),
+      h('p', { class: 'card-sub', text: payloads.length ? payloads.length + ' 个负载' : '按工作负载名或标签选择器圈定 Pod' })));
+    lhead.appendChild(h('div', { class: 'card-tools' },
+      btn('添加负载', { variant: 'primary', icon: 'plus', onClick: function () { openPayloadModal(null); }, fk: 'payload-add' })));
+    left.appendChild(lhead);
+
+    if (!payloads.length) {
+      left.appendChild(emptyBlock('box', '还没有负载',
+        '负载是四元组的第一元：用工作负载名或标签选择器圈定一组 Pod，点右上角「添加负载」开始'));
+    } else {
+      var list = h('div', { class: 'plist' });
+      if (first) list.className = 'plist enter';
+      payloads.forEach(function (p) {
+        var sel = p.name === ui.selectedPayload;
+        var item = h('div', { class: 'pitem' + (sel ? ' is-sel' : '') });
+        var pick = h('button', {
+          type: 'button',
+          class: 'pitem-pick',
+          'data-fk': 'payload:' + p.name,
+          'aria-pressed': sel ? 'true' : 'false',
+          'aria-label': '查看负载 ' + p.name + ' 的授权'
+        });
+        pick.appendChild(h('span', { class: 'pitem-name mono', text: p.name }));
+        pick.appendChild(h('span', { class: 'pitem-sub', text: payloadSummary(p) }));
+        var members = membersOf(p.name);
+        var tags = h('span', { class: 'pitem-tags' });
+        tags.appendChild(members.length
+          ? h('span', { class: 'tag mono', text: members.length + ' 个 Pod' })
+          : h('span', { class: 'tag tag-warn', text: '0 个 Pod' }));
+        tags.appendChild(h('span', { class: 'tag mono', text: grantsOf(p.name).length + ' 项授权' }));
+        pick.appendChild(tags);
+        pick.addEventListener('click', function () {
+          ui.selectedPayload = p.name;
+          renderAll();
+        });
+        item.appendChild(pick);
+        var acts = h('div', { class: 'pitem-actions' });
+        acts.appendChild(iconBtn('edit', '编辑负载 ' + p.name, { small: true, fk: 'pl-edit:' + p.name,
+          onClick: function () { openPayloadModal(p); } }));
+        acts.appendChild(iconBtn('trash', '删除负载 ' + p.name, { small: true, danger: true, fk: 'pl-del:' + p.name,
+          onClick: function () { confirmDeletePayload(p); } }));
+        item.appendChild(acts);
+        list.appendChild(item);
+      });
+      left.appendChild(list);
+    }
+    layout.appendChild(left);
+
+    /* 右栏：选中负载的授权 */
+    var right = h('section', { class: 'card' });
+    var current = ui.selectedPayload ? findPayload(ui.selectedPayload) : null;
+    var rhead = h('div', { class: 'card-head' });
+    if (!current) {
+      rhead.appendChild(h('div', { class: 'card-head-text' },
+        h('h2', { class: 'card-title', text: '该负载可访问的外部服务' }),
+        h('p', { class: 'card-sub', text: '先在左栏选择一个负载' })));
+    } else {
+      var grantedCount = grantsOf(current.name).length;
+      var headText = h('div', { class: 'card-head-text' });
+      var title = h('h2', { class: 'card-title' });
+      title.appendChild(h('span', { class: 'mono', text: current.name }));
+      headText.appendChild(title);
+      headText.appendChild(h('p', { class: 'card-sub', text: T(payloadSummary(current)) + T('；已授权 ' + grantedCount + ' / ' + d.targets.length + ' 个外部服务') }));
+      rhead.appendChild(headText);
+      rhead.appendChild(h('div', { class: 'card-tools' },
+        btn('编辑', { small: true, icon: 'edit', onClick: function () { openPayloadModal(current); }, fk: 'detail-edit' }),
+        btn('删除', { small: true, variant: 'ghost', icon: 'trash', danger: true, onClick: function () { confirmDeletePayload(current); }, fk: 'detail-del' })));
+    }
+    right.appendChild(rhead);
+
+    if (current) {
+      right.appendChild(h('div', { class: 'hint' },
+        icon('info', 14),
+        h('span', { text: '' }, h('b', { text: '勾选即代表该负载访问此服务时走代理节点对应端口；' }),
+          document.createTextNode(T('未勾选的服务在该负载上会被拒绝（enforce 模式）；勾选后立即写入控制器，节点会在数秒内同步')))));
+      var targets = sortedTargets();
+      if (!targets.length) {
+        right.appendChild(emptyBlock('link', '还没有外部服务可以授权',
+          '授权矩阵的每一行就是一个外部服务；先到「外部服务」新增目标，回来这里勾选即可放行',
+          [btn('去新增外部服务', { variant: 'primary', icon: 'plus', onClick: function () { selectTab('targets', true); } })]));
+      } else {
+        var grants = h('div', { class: 'grants' });
+        if (first) grants.className = 'grants enter';
+        targets.forEach(function (t) {
+          var key = targetKey(t);
+          var on = hasGrant(current.name, key);
+          var srcs = sourcesOf(key);
+          var row = h('div', { class: 'grant', 'aria-busy': 'false' });
+          var cb = h('input', {
+            type: 'checkbox',
+            class: 'sw',
+            checked: on,
+            'data-fk': 'grant:' + current.name + '|' + key
+          });
+      cb.setAttribute('aria-label', T((on ? '撤销' : '授予') + current.name + ' 访问 ' + key + ' 的授权'));
+          cb.addEventListener('change', function () { toggleGrant(current.name, key, cb); });
+          row.appendChild(cb);
+          var main = h('div', { class: 'grant-main' });
+          main.appendChild(h('span', { class: 'grant-target', text: key }));
+          var flow = h('span', { class: 'grant-flow' });
+          flow.appendChild(icon('arrow', 11));
+    flow.appendChild(document.createTextNode(T(' 经代理端口 ')));
+          flow.appendChild(h('b', { text: String(t.proxyPort) }));
+    flow.appendChild(document.createTextNode(T('（目标端口 ' + t.port + '）')));
+          main.appendChild(flow);
+          row.appendChild(main);
+          var side = h('div', { class: 'grant-side' },
+            h('span', { class: 'tag mono', title: '该目标当前生效源数量', text: '生效源 ' + srcs.length + ' 条' }));
+          row.appendChild(side);
+          grants.appendChild(row);
+        });
+        right.appendChild(grants);
+      }
+    } else {
+      right.appendChild(emptyBlock('box', '选择一个负载',
+        '左栏每个负载都能对同一批外部服务单独授权；选中后这里会列出全部外部服务与开关', []));
+    }
+    layout.appendChild(right);
+    sec.appendChild(layout);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 视图 3：运行状态                                                    *
+   * ------------------------------------------------------------------ */
+  function agentIsBehind(a) {
+    var gen = store.data ? store.data.generation : 0;
+    return a.generation < gen || a.stale || agentStaleByTime(a);
+  }
+  function agentStaleByTime(a) {
+    if (!a.lastSeen) return true;
+    var t = Date.parse(a.lastSeen);
+    if (!isFinite(t)) return true;
+    return (Date.now() - t) > STALE_MS;
+  }
+
+  function statCard(label, valueNode, note) {
+    var card = h('div', { class: 'stat' });
+    card.appendChild(h('span', { class: 'stat-label', text: label }));
+    card.appendChild(valueNode);
+    if (note) card.appendChild(note);
+    return card;
+  }
+
+  function renderStatusView(sec, first) {
+    var d = store.data;
+    var stats = h('div', { class: 'stats' + (first ? ' enter' : '') });
+
+    /* 期望 generation */
+    stats.appendChild(statCard('期望 generation',
+      h('span', { class: 'stat-value', text: 'gen ' + d.generation }),
+      h('span', { class: 'stat-note', text: '每次策略变更 +1，节点据此判断是否需要重新应用 iptables 规则' })));
+
+    /* 当前模式 */
+    var modeMetaCur = modeMeta(d.mode);
+    var modeValue = h('span', { class: 'stat-value is-text' });
+    modeValue.appendChild(h('span', { class: 'tag ' + (d.mode === 'enforce' ? 'tag-danger' : d.mode === 'observe' ? 'tag-warn' : 'tag-neutral'), text: modeMetaCur.tag }));
+    modeValue.appendChild(document.createTextNode(T(modeMetaCur.label + '模式')));
+    stats.appendChild(statCard('当前模式', modeValue,
+      h('span', { class: 'stat-note', text: modeMetaCur.id === 'enforce' ? '未授权流量会被拒绝' : (modeMetaCur.id === 'observe' ? '只记录不阻断' : '不做源地址管控') })));
+
+    /* Pod 索引 */
+    var podsValue = h('span', { class: 'stat-value', text: String(d.stats.podsKnown) });
+    var podsNote = d.podsError
+      ? h('span', { class: 'stat-note is-danger', text: '索引异常：' + d.podsError })
+      : h('span', { class: 'stat-note', text: '最近一次同步 ' + (d.podsAge || '—') + '，用于把负载展开成源 IP' });
+    stats.appendChild(statCard('Pod 索引', podsValue, podsNote));
+
+    /* 已解析负载 */
+    stats.appendChild(statCard('已解析负载',
+      h('span', { class: 'stat-value', text: d.stats.payloadsResolved + ' / ' + d.payloads.length }),
+      h('span', { class: 'stat-note', text: d.payloads.length
+        ? '命中 Pod 的负载数；没有命中的负载不会产生任何放行规则'
+        : '还没有配置负载' })));
+
+    /* 已装载目标 */
+    stats.appendChild(statCard('已装载目标',
+      h('span', { class: 'stat-value', text: d.stats.targetsArmed + ' / ' + d.targets.length }),
+      h('span', { class: 'stat-note', text: d.targets.length
+        ? '至少有一个负载授权的目标数；装载为 0 的目标在节点上等于拒绝'
+        : '还没有配置外部服务' })));
+
+    /* 存储后端 */
+    var isMemory = String(d.store).toLowerCase() === 'memory';
+    var storeValue = h('span', { class: 'stat-value', text: d.store });
+    var storeNote = isMemory
+      ? h('span', { class: 'stat-note is-danger' }, h('span', { class: 'tag tag-danger', text: '重启会丢策略' }))
+      : h('span', { class: 'stat-note', text: '策略已持久化，控制器重启后会自动恢复' });
+    stats.appendChild(statCard('存储后端', storeValue, storeNote));
+
+    sec.appendChild(stats);
+
+    /* Agent 表 */
+    var agentsCard = h('section', { class: 'card' });
+    var alive = d.agents.filter(function (a) { return !a.stale && !agentStaleByTime(a); }).length;
+    var behind = d.agents.filter(function (a) { return agentIsBehind(a); }).length;
+    var ahead = h('div', { class: 'card-head' });
+    ahead.appendChild(h('div', { class: 'card-head-text' },
+      h('h2', { class: 'card-title', text: '节点 agent' }),
+      h('p', { class: 'card-sub', text: d.agents.length
+        ? d.agents.length + ' 个节点上报，' + alive + ' 个在线' + (behind ? '，' + behind + ' 个待同步或失联' : '，全部已同步')
+        : '还没有节点上报过状态' })));
+    ahead.appendChild(h('div', { class: 'card-tools' },
+      btn('刷新', { small: true, icon: 'refresh', onClick: function () { refresh(); } })));
+    agentsCard.appendChild(ahead);
+
+    if (!d.agents.length) {
+      agentsCard.appendChild(emptyBlock('server', '还没有节点上报',
+        '节点上的 redirect-agent 每 30 秒左右上报一次状态；如果这里一直是空的，确认 DaemonSet 已在全部节点就绪，且能访问控制器的 /api/v1/agent-status', []));
+    } else {
+      var wrap = h('div', { class: 'table-wrap' });
+      var table = h('table', { class: 'tbl' });
+      var thead = h('thead');
+      var hr = h('tr');
+      ['节点', '模式', '上报 gen', '应用状态', '同步', '最后上报', '错误'].forEach(function (label) {
+        hr.appendChild(h('th', { scope: 'col', text: label }));
+      });
+      thead.appendChild(hr);
+      table.appendChild(thead);
+      var tbody = h('tbody');
+      if (first) tbody.className = 'enter';
+      d.agents.slice().sort(function (a, b) { return a.node < b.node ? -1 : 1; }).forEach(function (a, rowIndex) {
+        var lost = a.stale || agentStaleByTime(a);
+        var lagging = a.generation < d.generation;
+        var tr = h('tr', { class: rowIndex % 2 ? 'is-alt' : null });
+        tr.appendChild(h('td', null, h('span', { class: 'mono', text: a.node })));
+
+        var modeCell = h('td');
+        if (validMode(a.mode)) {
+          modeCell.appendChild(h('span', {
+            class: 'tag ' + (a.mode === 'enforce' ? 'tag-danger' : a.mode === 'observe' ? 'tag-warn' : 'tag-neutral'),
+            text: modeMeta(a.mode).tag
+          }));
+        } else {
+          modeCell.appendChild(h('span', { class: 'cell-note', text: a.mode || '—' }));
+        }
+        tr.appendChild(modeCell);
+
+        tr.appendChild(h('td', { class: 'mono', text: String(a.generation) }));
+
+        var appliedCell = h('td');
+        appliedCell.appendChild(h('span', { class: 'tag ' + (a.applied ? 'tag-ok' : 'tag-warn'), text: a.applied ? '已应用' : '未应用' }));
+        tr.appendChild(appliedCell);
+
+        var syncCell = h('td');
+        var syncWrap = h('div', { class: 'field-inline' });
+        if (lost) syncWrap.appendChild(h('span', { class: 'tag tag-danger', text: '失联' }));
+        else if (lagging) syncWrap.appendChild(h('span', { class: 'tag tag-warn', text: '待同步' }));
+        else syncWrap.appendChild(h('span', { class: 'tag tag-ok', text: '已同步' }));
+        if (lagging && !lost) syncWrap.appendChild(h('span', { class: 'cell-note mono', text: '差 ' + (d.generation - a.generation) + ' 代' }));
+        syncCell.appendChild(syncWrap);
+        tr.appendChild(syncCell);
+
+        var seenCell = h('td');
+        var seen = h('span', { class: 'cell-note mono', dataset: { ts: a.lastSeen || '' }, title: absTime(a.lastSeen) });
+        seen.textContent = relTime(a.lastSeen);
+        seenCell.appendChild(seen);
+        if (lost) seenCell.appendChild(h('span', { class: 'cell-note', text: ' 超过 60 秒未上报' }));
+        tr.appendChild(seenCell);
+
+        var errCell = h('td');
+        if (a.error) {
+          var errBox = h('span', { class: 'cell-note', title: a.error });
+          var errBox = h('span', { class: 'cell-note is-danger', title: a.error });
+          errBox.textContent = a.error.length > 60 ? a.error.slice(0, 60) + '…' : a.error;
+          errCell.appendChild(errBox);
+        } else {
+          errCell.appendChild(h('span', { class: 'cell-note', text: '—' }));
+        }
+        tr.appendChild(errCell);
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      agentsCard.appendChild(wrap);
+    }
+    sec.appendChild(agentsCard);
+
+    /* 告警 + 连通性 */
+    var bottom = h('div', { class: 'status-bottom' });
+
+    var warnDetails = h('details', { class: 'warnbox' });
+    if (d.warnings.length) warnDetails.open = true;
+    var summary = h('summary');
+    summary.appendChild(icon('alert', 15));
+    summary.appendChild(document.createTextNode(T('策略告警')));
+    summary.appendChild(h('span', { class: 'summary-count', text: d.warnings.length + ' 条' }));
+    summary.appendChild(h('span', { class: 'icon-end' }, icon('chevronDown', 14)));
+    warnDetails.appendChild(summary);
+    if (d.warnings.length) {
+      warnDetails.appendChild(h('pre', { text: d.warnings.map(function (w, i) { return '[' + (i + 1) + '] ' + w; }).join('\n\n') }));
+    } else {
+      warnDetails.appendChild(h('div', { class: 'empty' },
+        h('p', { class: 'empty-title', text: '没有告警' }),
+        h('p', { class: 'empty-desc', text: '控制器对当前策略没有需要提醒的事项；出现「匹配全部 Pod」「目标无授权」这类情况时会在这里列出原文' })));
+    }
+    bottom.appendChild(warnDetails);
+
+    var healthCard = h('section', { class: 'card' });
+    var hhead = h('div', { class: 'card-head' });
+    hhead.appendChild(h('div', { class: 'card-head-text' },
+      h('h2', { class: 'card-title', text: '控制器连通性' }),
+      h('p', { class: 'card-sub', text: '对 GET /healthz 发一次探测' })));
+    healthCard.appendChild(hhead);
+    var body = h('div', { class: 'health' });
+    var line = h('div', { class: 'health-line' + (ui.health ? (ui.health.ok ? ' is-ok' : ' is-bad') : '') });
+    if (!ui.health) {
+      line.appendChild(document.createTextNode(T('还没有探测过')));
+    } else {
+      line.appendChild(h('b', { text: ui.health.ok ? '正常' : '异常' }));
+      line.appendChild(document.createTextNode(T(ui.health.message)));
+    }
+    body.appendChild(line);
+    if (ui.health) {
+      body.appendChild(h('p', { class: 'health-meta', text: '最近一次探测 ' + fmtAgo(Date.now() - ui.health.at) }));
+    }
+    body.appendChild(h('div', { class: 'field-inline' },
+      btn('探测连通性', { small: true, icon: 'activity', onClick: function (ev) { probeHealth(ev.currentTarget); }, fk: 'btn-health' })));
+    healthCard.appendChild(body);
+    bottom.appendChild(healthCard);
+
+    sec.appendChild(bottom);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 写操作                                                              *
+   * ------------------------------------------------------------------ */
+  function apiPayload(p) {
+    var out = { name: p.name, namespaces: (p.namespaces || []).slice() };
+    if (p.workload && p.workload.name) out.workload = { kind: p.workload.kind || 'Deployment', name: p.workload.name };
+    var labels = p.matchLabels || {};
+    if (Object.keys(labels).length) out.matchLabels = labels;
+    else if (!out.workload) out.matchLabels = {};
+    return out;
+  }
+
+  function applyPolicy(parts, successMsg) {
+    var d = store.data;
+    if (!d) return Promise.reject(new Error('尚未读取到控制器状态'));
+    var body = {
+      generation: d.generation,
+      mode: validMode(d.modeRaw) ? d.modeRaw : d.mode,
+      payloads: parts.payloads.map(apiPayload),
+      targets: parts.targets.map(function (t) { return { host: t.host, port: t.port, proxyPort: t.proxyPort }; }),
+      grants: parts.grants.map(function (g) { return { payload: g.payload, target: g.target }; })
+    };
+    return request('/api/v1/policy', { method: 'PUT', body: body })
+      .then(function (res) {
+        var gen = res && typeof res.generation === 'number' ? res.generation : null;
+        if (store.data && gen !== null) store.data.generation = gen;
+        toast('ok', successMsg + (gen !== null ? '（gen ' + gen + '）' : ''));
+        closeModal();
+        return refresh({ silent: true });
+      })
+      .catch(function (e) {
+        handleActionError(e);
+        throw e;
+      });
+  }
+
+  function handleActionError(e) {
+    if (e && e.status === 409) {
+      toast('warn', '版本冲突，请刷新后重试');
+      refresh({ silent: true });
+      return;
+    }
+    if (e && e.kind === 'auth') { promptToken('令牌无效或已过期，请重新填写'); return; }
+    toast('err', (e && e.message) || '操作失败');
+  }
+
+  function toggleGrant(payloadName, key, cb) {
+    var want = cb.checked;
+    cb.disabled = true;
+    var row = cb.closest('.grant');
+    if (row) row.setAttribute('aria-busy', 'true');
+    request('/api/v1/grant', { method: 'POST', body: { payload: payloadName, target: key, allowed: want } })
+      .then(function (res) {
+        updateLocalGrant(payloadName, key, want);
+        if (store.data && res && typeof res.generation === 'number') store.data.generation = res.generation;
+        toast('ok', want ? (payloadName + ' 已获授权访问 ' + key + '（gen ' + (res && res.generation) + '）')
+                        : ('已撤销 ' + payloadName + ' 对 ' + key + ' 的授权（gen ' + (res && res.generation) + '）'));
+        renderAll();
+        refresh({ silent: true });
+      })
+      .catch(function (e) {
+        cb.checked = !want;   // 回滚勾选状态
+        cb.disabled = false;
+        if (row) row.setAttribute('aria-busy', 'false');
+        handleActionError(e);
+      });
+  }
+
+  function updateLocalGrant(payloadName, key, allowed) {
+    if (!store.data) return;
+    var grants = store.data.grants.filter(function (g) { return !(g.payload === payloadName && g.target === key); });
+    if (allowed) grants.push({ payload: payloadName, target: key });
+    store.data.grants = grants;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 集群信息（命名空间 / 工作负载）—— 失败即降级                        *
+   * ------------------------------------------------------------------ */
+  function loadNamespaces(force) {
+    var c = ui.cluster.ns;
+    // 每次都向控制器重新确认：集群不可用时要能真正降级，而不是拿旧缓存撑场面
+    var hadItems = c.status === 'ok' && c.items.length > 0;
+    if (!force && c.status === 'loading') return Promise.resolve(c);
+    if (!hadItems) c.status = 'loading';
+    c.error = '';
+    return request('/api/v1/cluster/namespaces').then(function (res) {
+      var items = arr(res.namespaces).map(str).filter(Boolean);
+      if (!items.length) throw new Error('命名空间列表为空');
+      c.items = items.sort();
+      c.status = 'ok';
+      c.at = Date.now();
+      return c;
+    }).catch(function (e) {
+      c.status = 'error';
+      c.error = (e && e.message) || '读取命名空间失败';
+      c.items = [];
+      return c;
+    });
+  }
+
+  function loadWorkloads(ns) {
+    var w = ui.cluster.wl;
+    w.status = 'loading';
+    w.ns = ns;
+    w.error = '';
+    w.items = [];
+    return request('/api/v1/cluster/workloads?namespace=' + encodeURIComponent(ns)).then(function (res) {
+      if (ui.cluster.wl.ns !== ns) return w;
+      w.items = arr(res.workloads).filter(function (x) { return x && typeof x === 'object'; }).map(function (x) {
+        return { kind: str(x.kind) || 'Deployment', name: str(x.name), ready: str(x.ready), selector: x.selector || {} };
+      }).filter(function (x) { return !!x.name; });
+      w.status = 'ok';
+      return w;
+    }).catch(function (e) {
+      if (ui.cluster.wl.ns !== ns) return w;
+      w.status = 'error';
+      w.error = (e && e.message) || '读取工作负载失败';
+      w.items = [];
+      return w;
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 弹窗基础                                                            *
+   * ------------------------------------------------------------------ */
+  function focusables(root) {
+    var sel = 'button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    return Array.prototype.filter.call(root.querySelectorAll(sel), function (n) {
+      return n.offsetParent !== null || n === document.activeElement;
+    });
+  }
+
+  function openModal(spec) {
+    closeModal(true);
+    var last = document.activeElement;
+    if (!last || last === document.body || last === document.documentElement) last = ui.lastTrigger;
+    var scrim = h('div', { class: 'scrim' });
+    var modal = h('div', {
+      class: 'modal' + (spec.wide ? ' modal-wide' : ''),
+      role: 'dialog',
+      'aria-modal': 'true',
+      'aria-labelledby': 'modal-title'
+    });
+    var head = h('div', { class: 'modal-head' });
+    var headText = h('div', { class: 'modal-head-text' });
+    headText.appendChild(h('h2', { class: 'modal-title', id: 'modal-title', text: spec.title }));
+    if (spec.subtitle) headText.appendChild(h('p', { class: 'modal-sub', text: spec.subtitle }));
+    head.appendChild(headText);
+    head.appendChild(iconBtn('close', '关闭弹窗', { onClick: function () { closeModal(); }, fk: 'modal-close', cls: 'modal-x' }));
+    modal.appendChild(head);
+
+    var body = h('div', { class: 'modal-body' });
+    appendKid(body, spec.body || []);
+    modal.appendChild(body);
+
+    if (spec.footer && spec.footer.length) {
+      var foot = h('div', { class: 'modal-foot' });
+      spec.footer.forEach(function (f) { foot.appendChild(f); });
+      modal.appendChild(foot);
+    }
+    scrim.appendChild(modal);
+    document.getElementById('modalRoot').appendChild(scrim);
+
+    function onKey(e) {
+      if (ui.popupOpen) return;   // 下拉展开时，Esc / Tab / 方向键交给下拉自己处理
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        closeModal();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      var f = focusables(modal);
+      if (!f.length) { e.preventDefault(); return; }
+      var first = f[0], lastEl = f[f.length - 1];
+      if (!modal.contains(document.activeElement)) { e.preventDefault(); first.focus(); return; }
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); lastEl.focus(); }
+      else if (!e.shiftKey && document.activeElement === lastEl) { e.preventDefault(); first.focus(); }
+    }
+    document.addEventListener('keydown', onKey, true);
+    scrim.addEventListener('mousedown', function (e) { if (e.target === scrim) closeModal(); });
+
+    ui.modal = { scrim: scrim, last: last, onKey: onKey, body: body };
+    var focusTarget = spec.initialFocus || focusables(modal)[0];
+    if (focusTarget) {
+      setTimeout(function () {
+        try {
+          focusTarget.focus();
+          if (focusTarget.select && focusTarget.type === 'text') focusTarget.select();
+        } catch (e) { /* ignore */ }
+      }, 0);
+    }
+    return { modal: modal, body: body };
+  }
+
+  function closeModal(silent) {
+    var m = ui.modal;
+    if (!m) return;
+    if (openSelect) openSelect();   // 弹窗关闭时收起还开着的下拉，避免浮层残留在 body 上
+    document.removeEventListener('keydown', m.onKey, true);
+    if (m.scrim.parentNode) m.scrim.parentNode.removeChild(m.scrim);
+    ui.modal = null;
+    if (silent) return;
+    var target = m.last;
+    var fk = (target && target.dataset && target.dataset.fk) ? target.dataset.fk : null;
+    if (target && document.contains(target) && typeof target.focus === 'function') {
+      try { target.focus({ preventScroll: true }); return; } catch (e) { /* ignore */ }
+    }
+    if (fk) {
+      var same = document.querySelector('[data-fk="' + fk.replace(/["\\]/g, '\\$&') + '"]');
+      if (same) { try { same.focus({ preventScroll: true }); return; } catch (e) { /* ignore */ } }
+      ui.pendingFocus = fk;   // 触发按钮会被下一次渲染替换，等渲染完成再归还焦点
+    }
+    var fallback = document.getElementById('btnRefresh');
+    if (fallback) fallback.focus({ preventScroll: true });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 弹窗：模式切换确认                                                  *
+   * ------------------------------------------------------------------ */
+  function confirmMode(next) {
+    var d = store.data;
+    if (!d) { toast('warn', '还没有读取到控制器状态'); return; }
+    if (d.mode === next) { toast('info', '当前已经是' + modeMeta(next).label + '模式'); return; }
+    var meta = modeMeta(next);
+    var cur = modeMeta(d.mode);
+    var risky = next === 'enforce';
+
+    var body = [
+      h('p', { class: 'modal-lead', text: '把执行模式从「' + cur.label + '」切换到「' + meta.label + '」？' }),
+      h('p', { class: 'modal-note', text: meta.desc })
+    ];
+    if (risky) {
+      body.push(h('div', { class: 'modal-warn' },
+        icon('alert', 15),
+        h('span', { text: '切换到强制模式后，未被授权的负载访问目标时会被节点 iptables 立即拒绝，可能中断正在进行的连接；建议先在观察模式确认日志里的拒绝记录符合预期' })));
+    } else if (next === 'disabled') {
+      body.push(h('div', { class: 'modal-warn' },
+        icon('alert', 15),
+        h('span', { text: '关闭四元组管控后，所有出网流量都会被代理，不再按源地址放行，也不再拒绝任何请求' })));
+    }
+    body.push(h('dl', { class: 'kv' },
+      h('dt', { text: '当前 generation' }), h('dd', { class: 'mono', text: String(d.generation) }),
+      h('dt', { text: '生效范围' }), h('dd', { text: '全部 ' + d.agents.length + ' 个已上报节点' })));
+
+    var confirmBtn = btn(risky ? '确认切换到强制' : '确认切换到' + meta.label, {
+      variant: risky ? 'danger' : 'primary',
+      onClick: function () {
+        confirmBtn.disabled = true;
+        request('/api/v1/mode', { method: 'POST', body: { mode: next } }).then(function (res) {
+          var gen = res && typeof res.generation === 'number' ? res.generation : null;
+          if (store.data && gen !== null) store.data.generation = gen;
+          closeModal(true);
+          toast('ok', '执行模式已切换为' + meta.label + (gen !== null ? '（gen ' + gen + '）' : ''));
+          refresh({ silent: true });
+        }).catch(function (e) {
+          confirmBtn.disabled = false;
+          handleActionError(e);
+        });
+      }
+    });
+
+    openModal({
+      title: '切换执行模式',
+      subtitle: '模式变更会立即写入策略并下发到所有节点',
+      body: body,
+      footer: [btn('取消', { onClick: function () { closeModal(); } }), confirmBtn],
+      initialFocus: confirmBtn
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 弹窗：令牌                                                          *
+   * ------------------------------------------------------------------ */
+  function promptToken(reason) {
+    if (ui.modal && ui.modal.kind === 'token') return;
+    var input = h('input', {
+      class: 'input mono',
+      type: 'password',
+      value: readToken(),
+      placeholder: 'X-EGP-Token',
+      autocomplete: 'off',
+      spellcheck: 'false',
+      id: 'token-input',
+      'data-fk': 'token-input'
+    });
+    var body = [];
+    if (reason) body.push(h('div', { class: 'modal-warn' }, icon('key', 15), h('span', { text: reason })));
+    body.push(h('div', { class: 'field' },
+      h('label', { class: 'field-label', text: '访问令牌', for: 'token-input' }),
+      input,
+      h('p', { class: 'field-hint', text: '控制器启用 --token 时，所有 /api/ 请求都需要带 X-EGP-Token；令牌保存在本机浏览器 localStorage（egp_token），不会回传给除本控制器以外的任何地方' })));
+
+    var save = btn('保存并刷新', { variant: 'primary', onClick: function () {
+      writeToken(input.value.trim());
+      closeModal(true);
+      toast('ok', input.value.trim() ? '令牌已保存' : '令牌已清除');
+      refresh();
+    } });
+    var clearBtn = btn('清除令牌', { onClick: function () {
+      writeToken('');
+      closeModal(true);
+      toast('info', '令牌已清除');
+      refresh();
+    } });
+
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); save.click(); }
+    });
+    openModal({
+      title: '访问令牌',
+      subtitle: '用于保护控制器的管理接口',
+      body: body,
+      footer: [clearBtn, btn('取消', { onClick: function () { closeModal(); } }), save],
+      initialFocus: input
+    });
+    if (ui.modal) ui.modal.kind = 'token';
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 弹窗：外部服务新增/编辑                                             *
+   * ------------------------------------------------------------------ */
+  function openTargetModal(editing) {
+    if (!store.data) { toast('warn', '还没有读取到控制器状态'); return; }
+    var d = store.data;
+    var others = d.targets.filter(function (t) { return !editing || targetKey(t) !== targetKey(editing); });
+    var v = {
+      host: editing ? editing.host : '',
+      port: editing ? String(editing.port) : '',
+      proxyPort: editing ? String(editing.proxyPort) : suggestProxyPort()
+    };
+
+    var hostInput = h('input', { class: 'input mono', type: 'text', value: v.host, placeholder: 'a.example.com 或 10.0.0.8', autocomplete: 'off', spellcheck: 'false', 'data-fk': 'f-host' });
+    var portInput = h('input', { class: 'input mono', type: 'text', inputmode: 'numeric', value: v.port, placeholder: '443', autocomplete: 'off', 'data-fk': 'f-port' });
+    var proxyInput = h('input', { class: 'input mono', type: 'text', inputmode: 'numeric', value: v.proxyPort, placeholder: '20001', autocomplete: 'off', 'data-fk': 'f-proxy' });
+
+    var hostErr = h('p', { class: 'field-err', hidden: true });
+    var portErr = h('p', { class: 'field-err', hidden: true });
+    var proxyErr = h('p', { class: 'field-err', hidden: true });
+
+    [hostInput, portInput, proxyInput].forEach(function (inp, idx) {
+      inp.addEventListener('input', function () { validate(false); });
+      inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+      if (idx === 2) inp.setAttribute('aria-describedby', 'proxy-err');
+    });
+    hostInput.setAttribute('id', 'f-host');
+    portInput.setAttribute('id', 'f-port');
+    proxyInput.setAttribute('id', 'f-proxy');
+    hostErr.setAttribute('id', 'host-err');
+    portErr.setAttribute('id', 'port-err');
+    proxyErr.setAttribute('id', 'proxy-err');
+    hostInput.setAttribute('aria-describedby', 'host-err');
+    portInput.setAttribute('aria-describedby', 'port-err');
+
+    var body = [
+      h('div', { class: 'field' },
+        h('label', { class: 'field-label', text: '目标 host', for: 'f-host' }),
+        hostInput,
+        hostErr,
+        h('p', { class: 'field-hint', text: '域名或 IPv4；四元组里它就是「目标域名/IP」，节点按 host:port 精确匹配' })),
+      h('div', { class: 'field-row' },
+        h('div', { class: 'field' },
+          h('label', { class: 'field-label', text: '目标端口', for: 'f-port' }),
+          portInput, portErr,
+          h('p', { class: 'field-hint', text: '外部服务真实监听端口，1–65535' })),
+        h('div', { class: 'field' },
+          h('label', { class: 'field-label', text: '代理端口', for: 'f-proxy' }),
+          proxyInput, proxyErr,
+          h('p', { class: 'field-hint', text: '负载通过本机这个端口访问目标，必须全局唯一' })))
+    ];
+
+    function showErr(elm, text) {
+      if (text) { elm.textContent = T(text); elm.hidden = false; } else { elm.textContent = ''; elm.hidden = true; }
+    }
+
+    function validate(quiet) {
+      var errs = {};
+      var host = hostInput.value.trim();
+      if (!host) errs.host = '请填写目标域名或 IPv4';
+      else if (!isHostName(host) && !isIPv4(host)) errs.host = '不是合法的域名或 IPv4 地址';
+      var port = parsePort(portInput.value);
+      if (!portInput.value.trim()) errs.port = '请填写目标端口';
+      else if (!port) errs.port = '端口需为 1–65535 的整数';
+      var proxy = parsePort(proxyInput.value);
+      if (!proxyInput.value.trim()) errs.proxy = '请填写代理端口';
+      else if (!proxy) errs.proxy = '端口需为 1–65535 的整数';
+      else if (others.some(function (t) { return t.proxyPort === proxy; })) {
+        var dup = others.filter(function (t) { return t.proxyPort === proxy; })[0];
+        errs.proxy = '代理端口 ' + proxy + ' 已被 ' + targetKey(dup) + ' 使用，必须全局唯一';
+      }
+      if (host && port && others.some(function (t) { return t.host === host && t.port === port; })) {
+        errs.host = 'host:port ' + host + ':' + port + ' 已存在';
+      }
+      if (!quiet) {
+        showErr(hostErr, errs.host);
+        showErr(portErr, errs.port);
+        showErr(proxyErr, errs.proxy);
+        hostInput.setAttribute('aria-invalid', errs.host ? 'true' : 'false');
+        portInput.setAttribute('aria-invalid', errs.port ? 'true' : 'false');
+        proxyInput.setAttribute('aria-invalid', errs.proxy ? 'true' : 'false');
+      }
+      return { errs: errs, host: host, port: port, proxy: proxy };
+    }
+
+    function submit() {
+      var res = validate(false);
+      var keys = Object.keys(res.errs);
+      if (keys.length) {
+        var order = ['host', 'port', 'proxy'];
+        var firstKey = order.filter(function (k) { return res.errs[k]; })[0];
+        var map = { host: hostInput, port: portInput, proxy: proxyInput };
+        toast('err', '表单还有 ' + keys.length + ' 处需要修正');
+        if (map[firstKey]) map[firstKey].focus();
+        return;
+      }
+      var nextTarget = { host: res.host, port: res.port, proxyPort: res.proxy };
+      var nextKey = targetKey(nextTarget);
+      var newTargets, newGrants;
+      if (editing) {
+        var oldKey = targetKey(editing);
+        newTargets = d.targets.map(function (t) { return targetKey(t) === oldKey ? nextTarget : t; });
+        newGrants = d.grants.map(function (g) { return g.target === oldKey ? { payload: g.payload, target: nextKey } : g; });
+      } else {
+        newTargets = d.targets.concat([nextTarget]);
+        newGrants = d.grants.slice();
+      }
+      saveBtn.disabled = true;
+      applyPolicy({ payloads: d.payloads, targets: newTargets, grants: newGrants },
+        editing ? ('已更新 ' + nextKey) : ('已新增 ' + nextKey)).catch(function () {
+          saveBtn.disabled = false;
+        });
+    }
+
+    var saveBtn = btn(editing ? '保存修改' : '新增服务', { variant: 'primary', onClick: submit });
+
+    openModal({
+      title: editing ? '编辑外部服务' : '新增外部服务',
+      subtitle: '目标域名/IP + 目标端口 + 代理端口，三者一旦确定就不要随意改动：负载侧引用的是代理端口',
+      body: body,
+      footer: [btn('取消', { onClick: function () { closeModal(); } }), saveBtn],
+      initialFocus: hostInput
+    });
+  }
+
+  function suggestProxyPort() {
+    var used = (store.data ? store.data.targets : []).map(function (t) { return t.proxyPort; });
+    var p = 20001;
+    while (used.indexOf(p) >= 0 && p < 65535) p++;
+    return String(p);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 弹窗：负载新增/编辑                                                 *
+   * ------------------------------------------------------------------ */
+  function openPayloadModal(editing) {
+    if (!store.data) { toast('warn', '还没有读取到控制器状态'); return; }
+    var d = store.data;
+    var takenNames = d.payloads.filter(function (p) { return !editing || p.name !== editing.name; }).map(function (p) { return p.name; });
+
+    var v = {
+      ns: editing && editing.namespaces.length ? editing.namespaces[0] : '',
+      kind: editing && editing.workload ? editing.workload.kind : 'Deployment',
+      wlName: editing && editing.workload ? editing.workload.name : '',
+      labels: editing && Object.keys(editing.matchLabels).length ? labelsToText(editing.matchLabels) : '',
+      name: editing ? editing.name : '',
+      nameDirty: !!editing,
+      matchMode: editing ? (editing.workload ? 'workload' : 'labels') : 'workload',
+      clusterDown: false
+    };
+
+    /* --- 名称 --- */
+    var nameInput = h('input', { class: 'input mono', type: 'text', value: v.name, placeholder: 'default-nginx', autocomplete: 'off', spellcheck: 'false', 'data-fk': 'f-name', id: 'f-name' });
+    var nameErr = h('p', { class: 'field-err', hidden: true, id: 'name-err' });
+    nameInput.setAttribute('aria-describedby', 'name-err');
+    nameInput.addEventListener('input', function () { v.name = nameInput.value.trim(); v.nameDirty = true; });
+
+    /* --- 匹配模式（原生 radio，天然支持方向键） --- */
+    var seg = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': '匹配模式' });
+    [['workload', '按工作负载名'], ['labels', '按标签选择器']].forEach(function (pair) {
+      var input = h('input', { type: 'radio', name: 'matchmode', value: pair[0], checked: v.matchMode === pair[0] });
+      if (pair[0] === v.matchMode) input.checked = true;
+      input.addEventListener('change', function () {
+        if (!input.checked) return;
+        v.matchMode = pair[0];
+        v.nameDirty = false;   // 切换匹配模式后重新按新规则生成名称
+        refreshMatch();
+        suggestName();
+      });
+      seg.appendChild(h('label', { class: 'seg-item' }, input, h('span', { text: pair[1] })));
+    });
+
+    /* --- 动态区域 --- */
+    var nsWrap = h('div', { class: 'field' });
+    var matchWrap = h('div', { class: 'field' });
+    var matchErr = h('p', { class: 'field-err', hidden: true, id: 'match-err' });
+    var nsErr = h('p', { class: 'field-err', hidden: true, id: 'ns-err' });
+
+    function showErr(node, text) {
+      if (text) { node.textContent = T(text); node.hidden = false; } else { node.textContent = ''; node.hidden = true; }
+    }
+
+    function refreshNs() {
+      clear(nsWrap);
+      nsWrap.appendChild(h('label', { class: 'field-label', text: '命名空间', for: 'f-ns' }));
+      var c = ui.cluster.ns;
+      if (c.status === 'ok') {
+        var sel = hSelect({ cls: 'mono', id: 'f-ns', fk: 'f-ns' });
+        sel.appendChild(h('option', { value: '', text: '选择命名空间' }));
+        c.items.forEach(function (ns) {
+          var opt = h('option', { value: ns, text: ns });
+          if (ns === v.ns) opt.selected = true;
+          sel.appendChild(opt);
+        });
+        sel.addEventListener('change', function () {
+          v.ns = sel.value;
+          refreshMatch();
+          suggestName();
+        });
+        nsWrap.appendChild(sel);
+      } else if (c.status === 'loading' || c.status === 'idle') {
+        nsWrap.appendChild(h('p', { class: 'field-hint', text: '正在读取集群命名空间…' }));
+      } else {
+        v.clusterDown = true;
+        var inp = h('input', { class: 'input mono', type: 'text', id: 'f-ns', 'data-fk': 'f-ns', value: v.ns, placeholder: 'default', autocomplete: 'off', spellcheck: 'false' });
+        inp.addEventListener('input', function () { v.ns = inp.value.trim(); refreshMatch(); suggestName(); });
+        nsWrap.appendChild(inp);
+        nsWrap.appendChild(h('p', { class: 'field-hint', text: '控制器未连接 apiserver，已切换为手动输入' + (c.error ? '（' + c.error + '）' : '') }));
+      }
+      nsWrap.appendChild(nsErr);
+    }
+
+    function degradedWorkload(label) {
+      var kindSel = hSelect({ cls: 'mono', id: 'f-kind', fk: 'f-kind' });
+      ['Deployment', 'StatefulSet', 'DaemonSet'].forEach(function (k) {
+        var opt = h('option', { value: k, text: k });
+        if (k === v.kind) opt.selected = true;
+        kindSel.appendChild(opt);
+      });
+      kindSel.addEventListener('change', function () { v.kind = kindSel.value; suggestName(); });
+      var nameInp = h('input', { class: 'input mono', type: 'text', id: 'f-wlname', 'data-fk': 'f-wlname', value: v.wlName, placeholder: 'nginx', autocomplete: 'off', spellcheck: 'false' });
+      nameInp.addEventListener('input', function () { v.wlName = nameInp.value.trim(); suggestName(); });
+      var row = h('div', { class: 'field-row' },
+        h('div', { class: 'field' }, h('label', { class: 'field-label', text: '工作负载类型', for: 'f-kind' }), kindSel),
+        h('div', { class: 'field' }, h('label', { class: 'field-label', text: '工作负载名称', for: 'f-wlname' }), nameInp));
+      matchWrap.appendChild(row);
+      if (label) matchWrap.appendChild(h('p', { class: 'field-hint', text: label }));
+    }
+
+    function refreshMatch() {
+      clear(matchWrap);
+      if (v.matchMode === 'workload') {
+        matchWrap.appendChild(h('span', { class: 'field-label', text: '工作负载' }));
+        var c = ui.cluster.ns;
+        var w = ui.cluster.wl;
+        var canPick = c.status === 'ok' && v.ns && c.items.indexOf(v.ns) >= 0;
+        var nsUsable = c.status === 'ok' && v.ns && c.items.indexOf(v.ns) >= 0;
+        var wlReady = nsUsable && w.status === 'ok' && w.ns === v.ns;
+        if (c.status !== 'ok' || (v.ns && !nsUsable)) {
+          // 集群接口不可用，或命名空间不在集群列表里：退回「类型 + 名称」手填
+          degradedWorkload(c.status !== 'ok'
+            ? '控制器未连接 apiserver，已切换为手动输入'
+            : '命名空间 ' + v.ns + ' 不在集群列表里，已切换为手动输入');
+        } else {
+          // 下拉常驻：没选命名空间 / 正在读取时只置灰，
+          // 这样切换命名空间不会「先消失再出现」，弹窗不会闪
+          if (!wlReady && w.status !== 'error' && (w.status !== 'loading' || w.ns !== v.ns)) {
+            loadWorkloads(v.ns).then(function () { if (document.contains(matchWrap)) refreshMatch(); });
+          }
+          var sel = hSelect({ cls: 'mono', id: 'f-wl', fk: 'f-wl', disabled: !wlReady });
+          if (!v.ns) {
+            sel.appendChild(h('option', { value: '', text: '先选择命名空间' }));
+          } else if (!wlReady) {
+            sel.appendChild(h('option', { value: '', text: w.status === 'error' ? '读取工作负载失败' : '正在读取工作负载…' }));
+          } else {
+            sel.appendChild(h('option', { value: '', text: '选择工作负载' }));
+            w.items.forEach(function (it) {
+              var opt = h('option', { value: it.kind + '/' + it.name, text: it.kind + '/' + it.name + (it.ready ? ' · ' + it.ready : '') });
+              if (it.kind === v.kind && it.name === v.wlName) opt.selected = true;
+              sel.appendChild(opt);
+            });
+          }
+          sel.addEventListener('change', function () {
+            var parts = sel.value.split('/');
+            v.kind = parts[0] || 'Deployment';
+            v.wlName = parts[1] || '';
+            suggestName();
+          });
+          matchWrap.appendChild(sel);
+          matchWrap.appendChild(h('p', {
+            class: 'field-hint',
+            text: !v.ns
+              ? '选定命名空间后，这里会列出该命名空间下的 Deployment / StatefulSet / DaemonSet'
+              : (w.status === 'error'
+                ? '读取工作负载失败：' + (w.error || '未知原因')
+                : (!wlReady ? '正在读取命名空间 ' + v.ns + ' 的工作负载…' : '选中后控制器会按该工作负载的 label selector 解析命中的 Pod'))
+          }));
+        }
+      } else {
+        matchWrap.appendChild(h('span', { class: 'field-label', text: '标签选择器', for: 'f-labels' }));
+        var labInput = h('input', { class: 'input mono', type: 'text', id: 'f-labels', 'data-fk': 'f-labels', value: v.labels, placeholder: 'app=nginx,tier=web', autocomplete: 'off', spellcheck: 'false' });
+        labInput.addEventListener('input', function () { v.labels = labInput.value; suggestName(); });
+        matchWrap.appendChild(labInput);
+        matchWrap.appendChild(h('p', { class: 'field-hint', text: '用逗号分隔的 k=v 列表，Pod 需同时满足全部标签；留空等于匹配所选命名空间下全部 Pod' }));
+      }
+      matchWrap.appendChild(matchErr);
+    }
+
+    function suggestName() {
+      if (v.nameDirty) return;
+      var tail = '';
+      if (v.matchMode === 'workload') {
+        tail = v.wlName ? (v.kind === 'Deployment' ? v.wlName : v.kind.toLowerCase() + '-' + v.wlName) : '';
+      } else {
+        var labels = parseLabels(v.labels);
+        var keys = Object.keys(labels);
+        if (keys.length) {
+          var k = keys[0];
+          tail = labels[k] ? k + '-' + labels[k] : k;
+        }
+      }
+      var suggestion = slug((v.ns ? v.ns + '-' : '') + tail);
+      nameInput.value = suggestion;
+      v.name = suggestion;
+    }
+
+    function validate() {
+      var errs = {};
+      if (!PAYLOAD_NAME_RE.test(v.name)) errs.name = '名称需匹配 ^[a-z0-9][a-z0-9-]{0,30}$：小写字母、数字、连字符，1–31 个字符';
+      else if (takenNames.indexOf(v.name) >= 0) errs.name = '已有同名负载 ' + v.name + '，请换一个名称';
+      if (!v.ns) errs.ns = '请选择或填写命名空间';
+      else if (v.ns.length > 63 || !NS_RE.test(v.ns)) errs.ns = '命名空间名不合法';
+      if (v.matchMode === 'workload') {
+        if (!v.kind) errs.match = '请选择工作负载类型';
+        else if (!v.wlName) errs.match = '请选择或填写工作负载名称';
+        else if (!/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(v.wlName)) errs.match = '工作负载名称不合法';
+      } else {
+        var labels = parseLabels(v.labels);
+        var labelKeys = Object.keys(labels);
+        var badKey = labelKeys.filter(function (k) { return !LABEL_RE.test(k) || k.length > 63; })[0];
+        var badVal = labelKeys.filter(function (k) { return labels[k] && (!LABEL_RE.test(labels[k]) || labels[k].length > 63); })[0];
+        if (!labelKeys.length) errs.match = '请填写至少一个标签选择器，例如 app=nginx';
+        else if (badKey) errs.match = '标签键不合法：' + badKey;
+        else if (badVal) errs.match = '标签值不合法：' + labels[badVal];
+      }
+      showErr(nameErr, errs.name);
+      showErr(nsErr, errs.ns);
+      showErr(matchErr, errs.match);
+      nameInput.setAttribute('aria-invalid', errs.name ? 'true' : 'false');
+      return errs;
+    }
+
+    function submit() {
+      var errs = validate();
+      var keys = Object.keys(errs);
+      if (keys.length) {
+        toast('err', '表单还有 ' + keys.length + ' 处需要修正');
+        if (errs.name) nameInput.focus();
+        else if (errs.ns) { var nsNode = nsWrap.querySelector('input, select'); if (nsNode) nsNode.focus(); }
+        else { var mNode = matchWrap.querySelector('input, select'); if (mNode) mNode.focus(); }
+        return;
+      }
+      var matchLabels = v.matchMode === 'labels' ? parseLabels(v.labels) : {};
+      var payload = {
+        name: v.name,
+        namespaces: [v.ns],
+        workload: v.matchMode === 'workload' ? { kind: v.kind, name: v.wlName } : null,
+        matchLabels: matchLabels
+      };
+      var newPayloads, newGrants;
+      if (editing) {
+        newPayloads = d.payloads.map(function (p) { return p.name === editing.name ? payload : p; });
+        newGrants = d.grants.map(function (g) { return g.payload === editing.name ? { payload: payload.name, target: g.target } : g; });
+      } else {
+        newPayloads = d.payloads.concat([payload]);
+        newGrants = d.grants.slice();
+      }
+      saveBtn.disabled = true;
+      applyPolicy({ payloads: newPayloads, targets: d.targets, grants: newGrants },
+        editing ? ('已更新负载 ' + payload.name) : ('已添加负载 ' + payload.name)).then(function () {
+          ui.selectedPayload = payload.name;
+          renderAll();
+        }).catch(function () {
+          saveBtn.disabled = false;
+        });
+    }
+
+    var body = [
+      h('div', { class: 'field' },
+        h('label', { class: 'field-label', text: '匹配模式' }),
+        seg,
+        h('p', { class: 'field-hint', text: '按工作负载名：按 metadata.name 选中该命名空间下的一个 Deployment / StatefulSet / DaemonSet，控制器再用它的 label selector 匹配 Pod；按标签选择器：完全由你手写的 k=v 决定' })),
+      nsWrap,
+      matchWrap,
+      h('div', { class: 'field' },
+        h('label', { class: 'field-label', text: '负载名称', for: 'f-name' }),
+        nameInput,
+        nameErr,
+        h('p', { class: 'field-hint', text: '策略里引用这个名称，需全局唯一；默认按「命名空间-工作负载」生成，可自行修改' }))
+    ];
+
+    nameInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+
+    var saveBtn = btn(editing ? '保存修改' : '添加负载', { variant: 'primary', onClick: submit });
+
+    openModal({
+      title: editing ? '编辑负载' : '添加负载',
+      subtitle: '负载 = 四元组的第一元，用命名空间 + 工作负载名或标签圈定一组 Pod',
+      body: body,
+      footer: [btn('取消', { onClick: function () { closeModal(); } }), saveBtn],
+      initialFocus: nameInput
+    });
+
+    refreshNs();
+    refreshMatch();
+    if (!v.nameDirty && !v.name) suggestName();
+
+    // 打开即向控制器确认集群可用性：502/503 或网络故障要能真正降级为手动输入
+    loadNamespaces(false).then(function () {
+      if (!document.contains(nsWrap)) return;
+      refreshNs();
+      refreshMatch();
+      if (!v.nameDirty && !v.name) suggestName();
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 弹窗：删除确认                                                      *
+   * ------------------------------------------------------------------ */
+  function confirmDeleteTarget(t) {
+    var key = targetKey(t);
+    var refs = refCount(key);
+    var payloadsAffected = (store.data ? store.data.grants : []).filter(function (g) { return g.target === key; }).map(function (g) { return g.payload; });
+    var body = [
+      h('p', { class: 'modal-lead', text: '删除外部服务 ' + key + '？' }),
+      h('dl', { class: 'kv' },
+        h('dt', { text: '代理端口' }), h('dd', { class: 'mono', text: String(t.proxyPort) + '（删除后释放）' }),
+        h('dt', { text: '受影响授权' }), h('dd', { text: refs ? refs + ' 条：' + payloadsAffected.join('、') : '没有负载引用这个目标' }))
+    ];
+    if (refs) {
+      body.push(h('div', { class: 'modal-warn' }, icon('alert', 15),
+        h('span', { text: '这 ' + refs + ' 个负载会立刻失去对 ' + key + ' 的访问授权：enforce 模式下它们的访问会被直接拒绝' })));
+    }
+    var delBtn = btn('确认删除', { variant: 'danger', onClick: function () {
+      delBtn.disabled = true;
+      var d = store.data;
+      var newTargets = d.targets.filter(function (x) { return targetKey(x) !== key; });
+      var newGrants = d.grants.filter(function (g) { return g.target !== key; });
+      applyPolicy({ payloads: d.payloads, targets: newTargets, grants: newGrants }, '已删除 ' + key + '，代理端口 ' + t.proxyPort + ' 已释放')
+        .catch(function () { delBtn.disabled = false; });
+    } });
+    openModal({
+      title: '删除外部服务',
+      subtitle: '目标一旦删除，节点上的对应规则也会随之回收',
+      body: body,
+      footer: [btn('取消', { onClick: function () { closeModal(); } }), delBtn]
+    });
+  }
+
+  function confirmDeletePayload(p) {
+    var granted = grantsOf(p.name).map(function (g) { return g.target; });
+    var members = membersOf(p.name);
+    var body = [
+      h('p', { class: 'modal-lead' }, h('span', { class: 'mono', text: p.name }), document.createTextNode(T(' 是当前选中的负载，确认删除？'))),
+      h('dl', { class: 'kv' },
+        h('dt', { text: '匹配' }), h('dd', { text: payloadSummary(p) }),
+        h('dt', { text: '命中 Pod' }), h('dd', { class: 'mono', text: String(members.length) + ' 个' }),
+        h('dt', { text: '将撤销的授权' }), h('dd', { text: granted.length ? granted.length + ' 条：' + granted.join('、') : '没有授权' }))
+    ];
+    if (granted.length) {
+      body.push(h('div', { class: 'modal-warn' }, icon('alert', 15),
+        h('span', { text: '删除后这些 Pod 对 ' + granted.join('、') + ' 的访问授权会一并撤销；enforce 模式下会被直接拒绝；外部服务本身不会被删除' })));
+    }
+    var delBtn = btn('确认删除', { variant: 'danger', onClick: function () {
+      delBtn.disabled = true;
+      var d = store.data;
+      var newPayloads = d.payloads.filter(function (x) { return x.name !== p.name; });
+      var newGrants = d.grants.filter(function (g) { return g.payload !== p.name; });
+      applyPolicy({ payloads: newPayloads, targets: d.targets, grants: newGrants }, '已删除负载 ' + p.name)
+        .then(function () {
+          if (ui.selectedPayload === p.name) ui.selectedPayload = null;
+          renderAll();
+        })
+        .catch(function () { delBtn.disabled = false; });
+    } });
+    openModal({
+      title: '删除负载',
+      subtitle: '只删除负载定义，Pod 与外部服务都不受影响',
+      body: body,
+      footer: [btn('取消', { onClick: function () { closeModal(); } }), delBtn]
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 健康探测                                                            *
+   * ------------------------------------------------------------------ */
+  function probeHealth(trigger) {
+    if (trigger) trigger.disabled = true;
+    request('/healthz').then(function (res) {
+      var gen = num(res && res.generation, 0);
+      ui.health = {
+        ok: str(res && res.status) === 'ok',
+        message: '，gen ' + gen + (res && res.store ? '，存储 ' + str(res.store) : '') + (res && res.mode ? '，模式 ' + str(res.mode) : ''),
+        at: Date.now()
+      };
+      renderAll();
+      renderStatusViewRefresh();
+    }).catch(function (e) {
+      ui.health = { ok: false, message: '：' + (e.message || '探测失败'), at: Date.now() };
+      handleActionError(e);
+      renderAll();
+      renderStatusViewRefresh();
+    }).then(function () {
+      if (trigger && document.contains(trigger)) trigger.disabled = false;
+    });
+  }
+
+  function renderStatusViewRefresh() {
+    if (ui.tab !== 'status') return;
+    var sec = document.getElementById('view-status');
+    if (!sec || !store.data) return;
+    clear(sec);
+    renderStatusView(sec, false);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 启动                                                                *
+   * ------------------------------------------------------------------ */
+  function init() {
+    applyStaticI18n();
+    renderStaticButtons();
+    renderModes();
+    renderModeHint();
+    renderTabs();
+    renderView();
+    /* 系统主题变化时（auto 态）同步图标与提示 */
+    window.__EGP_ON_SYS_THEME = function () { renderThemeButton(); };
+
+    // 记录最近一次点击的控件：程序化触发与键盘触发都能把焦点还回去
+    document.addEventListener('click', function (e) {
+      var t = e.target && e.target.closest ? e.target.closest('button, a, input, select, [data-fk]') : null;
+      if (t) ui.lastTrigger = t;
+    }, true);
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) { stopPoll(); }
+      else { refresh({ silent: true }); }
+    });
+    window.addEventListener('online', function () { refresh({ silent: true }); });
+    window.addEventListener('focus', function () {
+      if (store.lastOkAt && Date.now() - store.lastOkAt > POLL_MS * 2) refresh({ silent: true });
+    });
+
+    ageTimer = setInterval(tickClock, 1000);
+    tickClock();
+    refresh();
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();
+</script>
+</body>
+</html>

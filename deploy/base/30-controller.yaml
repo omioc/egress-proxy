@@ -1,0 +1,243 @@
+# =============================================================================
+# egress-proxy controller (four-tuple policy control plane + built-in WebUI)
+#
+# Responsibilities:
+#   * Store policies (payload / target / proxyPort / authorization relations), persisted into ConfigMap
+#     egress-proxy-policy (created and updated by this component itself; do not manage it with kustomize)
+#   * Periodically list cluster Pods and resolve the payload label selectors into concrete Pod IPs
+#   * Compile for each target "the set of source addresses allowed to reach it", for the node agents and
+#     tcp-forwarder to poll every options.policyInterval
+#   * Provide the REST API and the SPA console (port 18082 by default)
+#
+# One replica is enough: policies and indexes are tiny, and the data plane (DNAT/forwarding) does not depend on this
+# component being online; when this component goes offline the agents keep using the last successful result (fail-stale)
+#
+# Security note: the WebUI can change egress policies directly, so in production inject the API token through a Secret
+#   kubectl -n egress-proxy create secret generic egress-proxy-controller-token \
+#     --from-literal=token=<random string>
+# Without a token configured the API does not verify identity (the log warns about it)
+#
+# -----------------------------------------------------------------------------
+# egress-proxy controller（四元组策略控制面 + 内置 WebUI）
+#
+# 职责：
+#   * 保存策略（payload / target / proxyPort / 授权关系），持久化到 ConfigMap
+#     egress-proxy-policy（由本组件自己创建与更新，不要用 kustomize 管理它）
+#   * 周期性列取集群 Pod，把 payload 的标签选择器解析成具体的 Pod IP
+#   * 对每个 target 编译出「允许访问它的源地址集合」，供各节点 agent 与
+#     tcp-forwarder 按 options.policyInterval 轮询
+#   * 提供 REST API 与 SPA 控制台（默认 18082 端口）
+#
+# 单副本即可：策略与索引都很小，数据面（DNAT/转发）不依赖本组件在线；
+# 本组件下线时 agent 会沿用上一次成功的结果（fail-stale）
+#
+# 安全提示：WebUI 能直接改出网策略，生产环境务必通过 Secret 注入接口令牌；
+# 未配置令牌时接口不校验身份（日志会告警）。命令中的 <random string> 换成随机生成的令牌串：
+#   kubectl -n egress-proxy create secret generic egress-proxy-controller-token \
+#     --from-literal=token=<random string>
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: egress-proxy-controller
+  namespace: egress-proxy
+  labels:
+    app.kubernetes.io/name: controller
+    app.kubernetes.io/part-of: egress-proxy
+---
+# -----------------------------------------------------------------------------
+# Read-only access to Pods / namespaces / workloads: resolve payloads (by name or by
+# label) into concrete Pod IPs.
+#
+# 只读 Pod / 命名空间 / 工作负载：解析 payload（按名或按标签）成具体 Pod IP。
+# -----------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: egress-proxy-controller
+  labels:
+    app.kubernetes.io/name: controller
+    app.kubernetes.io/part-of: egress-proxy
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # ---------------------------------------------------------------------------
+  # Read-only namespaces and workloads: WebUI form drop-downs, and resolving a
+  # "workload name" into a label selector.
+  #
+  # 只读命名空间与工作负载：WebUI 表单下拉，以及把「工作负载名」解析成标签选择器。
+  # ---------------------------------------------------------------------------
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: egress-proxy-controller
+  labels:
+    app.kubernetes.io/name: controller
+    app.kubernetes.io/part-of: egress-proxy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: egress-proxy-controller
+subjects:
+  - kind: ServiceAccount
+    name: egress-proxy-controller
+    namespace: egress-proxy
+---
+# -----------------------------------------------------------------------------
+# Read and write the policy ConfigMap in this namespace only.
+#
+# 只在本命名空间读写策略 ConfigMap。
+# -----------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: egress-proxy-controller-policy
+  namespace: egress-proxy
+  labels:
+    app.kubernetes.io/name: controller
+    app.kubernetes.io/part-of: egress-proxy
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: egress-proxy-controller-policy
+  namespace: egress-proxy
+  labels:
+    app.kubernetes.io/name: controller
+    app.kubernetes.io/part-of: egress-proxy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: egress-proxy-controller-policy
+subjects:
+  - kind: ServiceAccount
+    name: egress-proxy-controller
+    namespace: egress-proxy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress-proxy-controller
+  namespace: egress-proxy
+  labels:
+    app.kubernetes.io/name: controller
+    app.kubernetes.io/part-of: egress-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: controller
+    app.kubernetes.io/part-of: egress-proxy
+  ports:
+    - name: http
+      port: 18082
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: egress-proxy-controller
+  namespace: egress-proxy
+  labels:
+    app.kubernetes.io/name: controller
+    app.kubernetes.io/part-of: egress-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: controller
+      app.kubernetes.io/part-of: egress-proxy
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: controller
+        app.kubernetes.io/part-of: egress-proxy
+    spec:
+      serviceAccountName: egress-proxy-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          # -------------------------------------------------------------------
+          # Placeholder image name: the real address is specified by the images section
+          # of deploy/kustomization.yaml.
+          #
+          # 占位镜像名：实际地址由 deploy/kustomization.yaml 的 images 段指定。
+          # -------------------------------------------------------------------
+          image: controller:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - -listen=:18082
+            - -namespace=egress-proxy
+            - -configmap=egress-proxy-policy
+            # -----------------------------------------------------------------
+            # The apiserver certificate is not verified by default (saves the CA
+            # configuration); set it to false for strict verification.
+            #
+            # 默认不校验 apiserver 证书（省去 CA 配置）；要严格校验改成 false。
+            # -----------------------------------------------------------------
+            - -insecure-skip-verify=true
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # -----------------------------------------------------------------
+            # Optional: API token (the variable is empty when the Secret does not exist
+            # = no verification, the log warns about it).
+            #
+            # 可选：接口令牌（Secret 不存在时变量为空 = 不校验，日志会告警）。
+            # -----------------------------------------------------------------
+            - name: EGRESS_CONTROLLER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: egress-proxy-controller-token
+                  key: token
+                  optional: true
+          ports:
+            - name: http
+              containerPort: 18082
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 20m
+              memory: 48Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

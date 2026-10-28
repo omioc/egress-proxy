@@ -1,0 +1,42 @@
+﻿# =============================================================================
+# egress-proxy redirect-agent 镜像
+#
+# 构建（在 egress-proxy 目录下执行）：
+#   docker build -f Dockerfile.agent -t <registry>/egress-proxy/redirect-agent:0.1.0 .
+# 或（Windows / PowerShell 7，构建并导出 tar 到 deploy/）：
+#   pwsh ./scripts/build-images.ps1 -Tag 0.1.0
+# =============================================================================
+
+# ---------- 构建阶段 ----------
+FROM golang:1.24-alpine AS build
+
+# Go 模块代理：默认走 goproxy.cn（国内网络更稳定），可用 --build-arg GOPROXY=... 覆盖
+ARG GOPROXY=https://goproxy.cn,direct
+ARG VERSION=dev
+ENV GOPROXY=${GOPROXY}
+
+WORKDIR /src
+
+# 依赖按 go.sum 通过 GOPROXY 拉取（仓库不含 vendor/）；先只拷清单，这一层可命中构建缓存
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# 静态编译，产物放 /out
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X egress-proxy/internal/logging.Version=${VERSION}" -o /out/redirect-agent ./cmd/redirect-agent
+
+# ---------- 运行阶段 ----------
+FROM alpine:3.20
+
+# iptables 包同时提供 iptables-nft 与 iptables-legacy 两个前端：
+#   iptables        -> 默认前端（新版 Alpine 指向 nft 后端）
+#   iptables-legacy -> 传统后端
+# 可通过配置 options.iptablesBinary 在 iptables / iptables-legacy 之间切换，
+# 必须与节点上 kube-proxy 使用的后端保持一致。
+# iproute2 提供 ip 等排查工具。
+RUN apk add --no-cache iptables iproute2
+
+COPY --from=build /out/redirect-agent /usr/local/bin/redirect-agent
+
+ENTRYPOINT ["/usr/local/bin/redirect-agent"]

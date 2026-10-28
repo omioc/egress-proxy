@@ -1,0 +1,39 @@
+﻿# =============================================================================
+# egress-proxy controller 镜像
+#
+# 构建（在 egress-proxy 目录下执行）：
+#   docker build -f Dockerfile.controller -t <registry>/egress-proxy/controller:0.1.0 .
+# 或（Windows / PowerShell 7，构建并导出 tar 到 deploy/）：
+#   pwsh ./scripts/build-images.ps1 -Tag 0.1.0
+# =============================================================================
+
+# ---------- 构建阶段 ----------
+FROM golang:1.24-alpine AS build
+
+# Go 模块代理：默认走 goproxy.cn（国内网络更稳定），可用 --build-arg GOPROXY=... 覆盖
+ARG GOPROXY=https://goproxy.cn,direct
+ARG VERSION=dev
+ENV GOPROXY=${GOPROXY}
+
+WORKDIR /src
+
+# 依赖按 go.sum 通过 GOPROXY 拉取（仓库不含 vendor/）；先只拷清单，这一层可命中构建缓存
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# WebUI 通过 go:embed 打进二进制，因此这里只需要编译一个可执行文件
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X egress-proxy/internal/logging.Version=${VERSION}" -o /out/controller ./cmd/controller
+
+# ---------- 运行阶段 ----------
+FROM alpine:3.20
+
+# 以非 root 运行（与 Deployment 的 runAsUser 保持一致）
+RUN adduser -D -u 10001 controller
+
+COPY --from=build /out/controller /usr/local/bin/controller
+
+USER 10001:10001
+
+ENTRYPOINT ["/usr/local/bin/controller"]

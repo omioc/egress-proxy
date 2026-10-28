@@ -1,0 +1,191 @@
+# =============================================================================
+# egress-proxy redirect-agent (DaemonSet)
+#
+# Purpose: run one redirect-agent on every worker node; it reads the targets list from the ConfigMap, resolves domains
+#          into IPv4 addresses, and maintains DNAT rules with iptables in the dedicated chain EGRESS-PROXY of the NAT
+#          table, DNAT-ing TCP traffic that hits a target to the corresponding proxyPort on the proxy node (listened on
+#          by tcp-forwarder)
+#
+# Key properties:
+#   * Rules are only added to and removed from the dedicated chain EGRESS-PROXY; other chains are never modified;
+#   * Deleting this DaemonSet (or its Pod) sends SIGTERM to the agent, which cleans up the rules and chain it created,
+#     so traffic immediately falls back to direct upstream connections
+#
+# How to apply: kubectl apply -k deploy/ (recommended) or kubectl apply -f deploy/base/10-daemonset.yaml
+#
+# -----------------------------------------------------------------------------
+# egress-proxy redirect-agent（DaemonSet）
+#
+# 用途：在「每个工作节点」上运行一个 redirect-agent，读取 ConfigMap 中的
+#       targets 列表，解析域名得到 IPv4 地址后，用 iptables 在 NAT 表的
+#       专属链 EGRESS-PROXY 内维护 DNAT 规则，把命中目标的 TCP 流量
+#       DNAT 到代理节点的对应 proxyPort（由 tcp-forwarder 监听）
+#
+# 重要特性：
+#   * 本组件只在专属链 EGRESS-PROXY 内增删规则，不会改动其他链的内容；
+#   * 删除本 DaemonSet（或删除对应 Pod）时，agent 会收到 SIGTERM 并自动
+#     清理自己创建的规则与链，流量立即恢复为直连上游
+#
+# 应用方式：kubectl apply -k deploy/（推荐）或 kubectl apply -f deploy/base/10-daemonset.yaml
+# =============================================================================
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: egress-proxy-redirect-agent
+  namespace: egress-proxy
+  labels:
+    app.kubernetes.io/name: redirect-agent
+    app.kubernetes.io/part-of: egress-proxy
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redirect-agent
+      app.kubernetes.io/part-of: egress-proxy
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redirect-agent
+        app.kubernetes.io/part-of: egress-proxy
+    spec:
+      # -----------------------------------------------------------------------
+      # iptables must operate in the node network namespace directly, so the host
+      # network is used.
+      #
+      # 需要直接操作节点 netns 的 iptables，因此使用宿主机网络。
+      # -----------------------------------------------------------------------
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # -----------------------------------------------------------------------
+      # Leave the agent time to clean up iptables rules before it exits: the in-agent
+      # cleanup timeout is 10s (a single command waits at most 5s for the xtables
+      # lock), so leave a larger margin here to keep the cleanup from being
+      # interrupted by SIGKILL and leaving rules behind.
+      #
+      # 给 agent 留出时间在退出前清理 iptables 规则：agent 内部清理超时为 10s
+      # （单条命令最多等待 xtables 锁 5s），这里留更大余量，避免清理过程被
+      # SIGKILL 打断而残留规则。
+      # -----------------------------------------------------------------------
+      terminationGracePeriodSeconds: 30
+      # -----------------------------------------------------------------------
+      # Run on worker nodes only: no control-plane / master tolerations are added on
+      # purpose here, so control-plane nodes are guaranteed never to get DNAT rules
+      # injected.
+      #
+      # 仅工作节点运行：这里刻意不加 control-plane / master 的 tolerations，
+      # 保证控制平面节点不会被注入 DNAT 规则。
+      # -----------------------------------------------------------------------
+      securityContext:
+        # ---------------------------------------------------------------------
+        # root is required to operate iptables (both the xtables lock and NAT table
+        # operations need root).
+        #
+        # 必须 root 才能操作 iptables（xtables 锁与 NAT 表操作都需要 root）。
+        # ---------------------------------------------------------------------
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+        - name: redirect-agent
+          # -------------------------------------------------------------------
+          # Placeholder image name: the image actually used is specified centrally by
+          # the images section of deploy/kustomization.yaml; if you do not use
+          # kustomize (kubectl apply -f deploy/base/), change this line to the real
+          # address, which removes the placeholder meaning.
+          #
+          # 占位镜像名：实际使用的镜像统一由 deploy/kustomization.yaml 的 images 段
+          # 指定；若不使用 kustomize（kubectl apply -f deploy/base/），请改成本行去掉
+          # 占位含义的真实地址。
+          # -------------------------------------------------------------------
+          image: redirect-agent:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - -config=/etc/egress-proxy/config.yaml
+          env:
+            # -----------------------------------------------------------------
+            # Downward API: this node IP; the agent uses it to decide whether it is
+            # the proxy node.
+            #
+            # Downward API：本节点 IP，agent 用它判断自己是否是代理节点。
+            # -----------------------------------------------------------------
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            # -----------------------------------------------------------------
+            # Downward API: this node name; the agent uses it to request "the allowed
+            # sources of this node" from the controller.
+            #
+            # Downward API：本节点名，agent 用它向控制器请求「本节点的允许源」。
+            # -----------------------------------------------------------------
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # -----------------------------------------------------------------
+            # Optional: controller API token (the variable is empty when the Secret
+            # does not exist; only needed when the controller enables tokens).
+            #
+            # 可选：控制器接口令牌（Secret 不存在时变量为空，仅在控制器启用令牌时
+            # 需要）。
+            # -----------------------------------------------------------------
+            - name: EGRESS_CONTROLLER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: egress-proxy-controller-token
+                  key: token
+                  optional: true
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_ADMIN
+                - NET_RAW
+            # -----------------------------------------------------------------
+            # If iptables/xtables behavior is restricted on the target cluster (e.g.
+            # some managed kernels or security policies forbid unprivileged containers
+            # from calling netlink), you can fall back to granting full privileges:
+            #     securityContext:
+            #       privileged: true
+            #
+            # 若目标集群的 iptables/xtables 行为受限（例如某些托管内核或安全策略
+            # 禁止非特权容器调用 netlink），可退回授予完整特权：
+            #     securityContext:
+            #       privileged: true
+            # -----------------------------------------------------------------
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            # -----------------------------------------------------------------
+            # Read-only configuration mount (hot-reloaded by the agent polling after
+            # the ConfigMap is updated).
+            #
+            # 配置只读挂载（ConfigMap 更新后由 agent 轮询热加载）。
+            # -----------------------------------------------------------------
+            - name: config
+              mountPath: /etc/egress-proxy
+              readOnly: true
+            # -----------------------------------------------------------------
+            # iptables needs to write /run/xtables.lock while the root filesystem is
+            # read-only, hence the emptyDir.
+            #
+            # iptables 需要写 /run/xtables.lock，根文件系统只读，故挂 emptyDir。
+            # -----------------------------------------------------------------
+            - name: run
+              mountPath: /run
+      volumes:
+        - name: config
+          configMap:
+            name: egress-proxy-config
+        - name: run
+          emptyDir: {}

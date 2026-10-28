@@ -1,0 +1,177 @@
+# =============================================================================
+# egress-proxy tcp-forwarder (Deployment)
+#
+# Purpose: on the proxy node, listen on the proxyPort of every target and forward each connection to that target's
+#          original host:port; redirect-agent on every worker node DNATs the matching traffic to these ports on this node
+#
+# Single point:
+#   * This Deployment has only 1 replica and is bound to the fixed node labeled egress-proxy=true (hostNetwork), so it is
+#     a single point; if that node goes down, traffic of all matching external services fails until the node recovers or
+#     the label is moved to another node
+#
+# Deployment prerequisites (the order cannot be reversed):
+#   1) kubectl label node <node> egress-proxy=true
+#   2) fill this node IP into proxy.address of deploy/config.yaml
+#   3) kubectl apply -k deploy/
+#
+# How to apply: kubectl apply -k deploy/ (recommended) or kubectl apply -f deploy/base/20-proxy-deployment.yaml
+#
+# -----------------------------------------------------------------------------
+# egress-proxy tcp-forwarder（Deployment）
+#
+# 用途：在「代理节点」上监听所有 target 的 proxyPort，把连接转发到该 target
+#       的原始 host:port；redirect-agent 在各工作节点上把命中的流量 DNAT 到
+#       本节点的这些端口
+#
+# 单点说明：
+#   * 本 Deployment 只有 1 个副本、且绑定在打了 egress-proxy=true 标签的
+#     固定节点上（hostNetwork），因此是「单点」；该节点宕机时，命中的外部
+#     服务流量会全部失败，直到节点恢复或把标签迁移到另一台节点
+#
+# 部署前提（顺序不能反）：
+#   1) 给代理节点打标签：kubectl label node <node> egress-proxy=true
+#   2) 把该节点 IP 填入 deploy/config.yaml 的 proxy.address
+#   3) 执行：kubectl apply -k deploy/
+#
+# 应用方式：kubectl apply -k deploy/（推荐）或 kubectl apply -f deploy/base/20-proxy-deployment.yaml
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: egress-proxy-tcp-forwarder
+  namespace: egress-proxy
+  labels:
+    app.kubernetes.io/name: tcp-forwarder
+    app.kubernetes.io/part-of: egress-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tcp-forwarder
+      app.kubernetes.io/part-of: egress-proxy
+  strategy:
+    # -------------------------------------------------------------------------
+    # hostNetwork + fixed listening ports (20001-20006 etc.) would make a rolling
+    # update hit port conflicts, so Recreate is used: stop the old Pod first, then
+    # start the new one.
+    #
+    # hostNetwork + 固定监听端口（20001-20006 等），滚动升级会出现端口占用冲突，
+    # 因此使用 Recreate：先停旧 Pod 再起新 Pod。
+    # -------------------------------------------------------------------------
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tcp-forwarder
+        app.kubernetes.io/part-of: egress-proxy
+    spec:
+      # -----------------------------------------------------------------------
+      # Must listen on the node IP's proxyPort for the DNAT coming from worker nodes,
+      # so the host network is used.
+      #
+      # 需要监听节点 IP 的 proxyPort，供工作节点 DNAT 过来，因此用宿主机网络。
+      # -----------------------------------------------------------------------
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # -----------------------------------------------------------------------
+      # Wait for in-flight connections to finish naturally before exiting.
+      #
+      # 等待进行中的连接自然结束，再退出。
+      # -----------------------------------------------------------------------
+      terminationGracePeriodSeconds: 30
+      # -----------------------------------------------------------------------
+      # Proxy node selector: label the node first with
+      # kubectl label node <node> egress-proxy=true
+      #
+      # 代理节点选择器：先给节点打标签
+      # kubectl label node <node> egress-proxy=true
+      # -----------------------------------------------------------------------
+      nodeSelector:
+        egress-proxy: "true"
+      containers:
+        - name: tcp-forwarder
+          # -------------------------------------------------------------------
+          # Placeholder image name: the image actually used is specified centrally by
+          # the images section of deploy/kustomization.yaml; if you do not use
+          # kustomize (kubectl apply -f deploy/base/), change this line to the real
+          # address, which removes the placeholder meaning.
+          #
+          # 占位镜像名：实际使用的镜像统一由 deploy/kustomization.yaml 的 images 段
+          # 指定；若不使用 kustomize（kubectl apply -f deploy/base/），请改成本行去掉
+          # 占位含义的真实地址。
+          # -------------------------------------------------------------------
+          image: tcp-forwarder:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - -config=/etc/egress-proxy/config.yaml
+          env:
+            # -----------------------------------------------------------------
+            # Downward API: this node IP, used to decide whether this is the proxy node
+            # named by proxy.address.
+            #
+            # Downward API：本节点 IP，用于判定自己是否就是 proxy.address 指定的代理
+            # 节点。
+            # -----------------------------------------------------------------
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            # -----------------------------------------------------------------
+            # Optional: controller API token (the variable is empty when the Secret
+            # does not exist; only needed when the controller enables tokens).
+            #
+            # 可选：控制器接口令牌（Secret 不存在时变量为空，仅在控制器启用令牌时
+            # 需要）。
+            # -----------------------------------------------------------------
+            - name: EGRESS_CONTROLLER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: egress-proxy-controller-token
+                  key: token
+                  optional: true
+          ports:
+            # -----------------------------------------------------------------
+            # Matches the options.healthPort default in the ConfigMap; probe port.
+            #
+            # 与 ConfigMap 中 options.healthPort 默认值一致；探针端口。
+            # -----------------------------------------------------------------
+            - name: health
+              containerPort: 18081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 18081
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 18081
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            # -----------------------------------------------------------------
+            # Read-only configuration mount (hot-reloaded by the forwarder polling
+            # after the ConfigMap is updated).
+            #
+            # 配置只读挂载（ConfigMap 更新后由 forwarder 轮询热加载）。
+            # -----------------------------------------------------------------
+            - name: config
+              mountPath: /etc/egress-proxy
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: egress-proxy-config

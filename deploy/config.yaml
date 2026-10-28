@@ -1,0 +1,108 @@
+# =============================================================================
+# egress-proxy runtime configuration — the file you normally edit.
+#
+# This file is packed by the configMapGenerator in deploy/kustomization.yaml into
+# data["config.yaml"] of the ConfigMap egress-proxy-config, and mounted read-only at
+# /etc/egress-proxy/config.yaml in both workloads, so what you edit here is exactly
+# what the Pods read.
+#
+# One command applies it; no Pod restart is needed, because both components hot-reload
+# the mounted file every options.configInterval (2s by default). kubelet itself needs
+# from a few seconds up to a minute to sync the ConfigMap into the Pod:
+#     kubectl apply -k deploy/
+#
+# Usually only two places need editing: proxy.address and targets.
+#
+# -----------------------------------------------------------------------------
+# egress-proxy 运行配置 —— 日常部署只需要改这个文件。
+#
+# 本文件由 deploy/kustomization.yaml 的 configMapGenerator 打包成 ConfigMap
+# egress-proxy-config 的 data["config.yaml"]，并以只读方式挂载到两个工作负载的
+# /etc/egress-proxy/config.yaml —— 你改的内容与 Pod 内文件完全一致。
+#
+# 改完执行一条命令即可生效，无需重启 Pod：两个组件按 options.configInterval
+# （默认 2s）轮询挂载文件热加载；kubelet 把 ConfigMap 同步到 Pod 内需要数秒 ~ 1 分钟，
+#     即：kubectl apply -k deploy/
+#
+# 通常只需要改两个地方：proxy.address 与 targets。
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+#   proxy.address  required. IPv4 of the proxy node — the worker node labeled
+#                  egress-proxy=true. It is the DNAT --to-destination, so it must be
+#                  the node that runs tcp-forwarder.
+#   proxy.listen   tcp-forwarder listen address. Keep 0.0.0.0, otherwise traffic
+#                  DNAT-ed from the worker nodes may not reach it.
+#
+#   proxy.address  必填。代理节点 IP（IPv4），即打了 egress-proxy=true 标签的那台
+#                  工作节点；它是 DNAT 的 --to-destination，必须就是运行
+#                  tcp-forwarder 的节点。
+#   proxy.listen   tcp-forwarder 的监听地址。建议保持 0.0.0.0，否则工作节点 DNAT
+#                  过来的流量可能连不上。
+# -----------------------------------------------------------------------------
+proxy:
+  address: "172.20.20.5"
+  listen: "0.0.0.0"
+
+# -----------------------------------------------------------------------------
+#   TCP traffic whose host + port matches an entry below is DNAT-ed to the proxy
+#   node. One entry per mapping; several ports on the same host need several entries:
+#       - host: a.example.com     # hostname or IPv4 (only IPv4 takes effect)
+#         port: 443               # original target port
+#         proxyPort: 20001        # listen port on the proxy node, unique per target
+#
+#   Once four-tuple policy control is enabled (options.policyUrl below is non-empty),
+#   this whole section is replaced by the policy pushed from the controller: you may
+#   delete it and keep only `targets: []`, configuring everything in the WebUI.
+#
+#   命中下面 host + port 的 TCP 流量会被 DNAT 到代理节点。每条映射一项；同一个 host
+#   的多个端口要拆成多项：
+#       - host: a.example.com     # 域名或 IPv4（仅 IPv4 生效）
+#         port: 443               # 原始目标端口
+#         proxyPort: 20001        # 代理节点上的监听端口，每条 target 必须唯一
+#
+#   启用四元组管控后（下面 options.policyUrl 非空），本段会被控制器下发的策略完全
+#   取代：可以整段删掉、只留 `targets: []`，全部在 WebUI 里配置。
+# -----------------------------------------------------------------------------
+targets:
+
+# -----------------------------------------------------------------------------
+#   Every option may be omitted; the defaults are listed here — uncomment a line to
+#   override it.
+#       resolveInterval: 30s      # domain re-resolution interval
+#       configInterval: 2s        # config file poll interval (ConfigMap hot reload)
+#       syncInterval: 60s         # rule drift self-check interval
+#       dialTimeout: 5s           # forwarder dial timeout
+#       maxIPsPerHost: 8          # max rule IPs kept per hostname
+#       iptablesBinary: iptables  # or iptables-legacy; must match the kube-proxy backend
+#       chainName: EGRESS-PROXY   # dedicated iptables chain name
+#       healthPort: 18081         # tcp-forwarder /healthz port
+#       dnsServers: []            # optional, override the default DNS servers
+#       excludeCIDRs: []          # optional, CIDRs to exclude (Pod/Service CIDR, ...)
+#       policyInterval: 2s        # how often the policy is pulled from the controller
+#
+#   Four-tuple traffic control (managed from the WebUI):
+#       policyUrl is already set below. Fill in the controller address to enable it —
+#       targets are then pushed by the controller and this file's targets no longer
+#       apply. Leave it empty to fall back to the old behaviour: every target listed
+#       in this file is passed through the proxy.
+#
+#   options 段全部可省略，省略即使用这里的默认值；取消注释即可覆盖。
+#       resolveInterval: 30s      # 域名重解析周期
+#       configInterval: 2s        # 配置文件轮询间隔（ConfigMap 热加载依赖它）
+#       syncInterval: 60s         # 规则漂移自检周期
+#       dialTimeout: 5s           # 转发拨号超时
+#       maxIPsPerHost: 8          # 每域名最多维护的规则 IP 数
+#       iptablesBinary: iptables  # 或 iptables-legacy；必须与 kube-proxy 后端一致
+#       chainName: EGRESS-PROXY   # 专属 iptables 链名
+#       healthPort: 18081         # tcp-forwarder 的 /healthz 端口
+#       dnsServers: []            # 可选，覆盖默认 DNS 服务器
+#       excludeCIDRs: []          # 可选，需排除的网段（集群 Pod/Service CIDR 等）
+#       policyInterval: 2s        # 从控制器拉取策略的周期
+#
+#   四元组流量管控（在 WebUI 里管理）：
+#       policyUrl 已在下面填好。填上控制器地址即启用 —— targets 由控制器下发，本文件的
+#       targets 不再生效；留空则退回旧行为：按本文件的 targets 全量直通代理。
+# -----------------------------------------------------------------------------
+options:
+  policyUrl: http://egress-proxy-controller.egress-proxy.svc:18082

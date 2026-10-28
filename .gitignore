@@ -1,0 +1,7 @@
+# 构建产物
+bin/
+deploy/*.tar
+
+# 本地临时文件
+*.log
+*.tmp
